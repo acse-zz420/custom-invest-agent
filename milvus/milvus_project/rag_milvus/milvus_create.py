@@ -3,6 +3,9 @@ import time
 import os
 from pathlib import Path
 from typing import List, Tuple
+
+from sqlalchemy.testing.suite.test_reflection import metadata
+
 from tool import timer
 
 # 本地模块
@@ -20,7 +23,7 @@ from llama_index.core import (
 from llama_index.core.prompts import PromptTemplate
 from llama_index.vector_stores.milvus import MilvusVectorStore
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
-from pymilvus import CollectionSchema, FieldSchema, DataType
+from pymilvus import CollectionSchema, FieldSchema, DataType, Collection, utility, connections
 
 # Transformers 模块
 from transformers import AutoConfig
@@ -108,9 +111,11 @@ def process_all_md_files(
                 text=chunk_text,
                 id_=chunk_id,
                 metadata={
-                    "file_name": filename,
-                    "file_id":file_id,
-                    **full_struct # 数据结构
+                    "metadata": {
+                        "file_name": filename,
+                        "file_id": file_id,
+                        **full_struct  # 数据结构
+                    }
                 }
             )
             all_documents.append(node)
@@ -121,6 +126,7 @@ def process_all_md_files(
         print("没有生成任何文档，流程终止。")
         return None
 
+
     # 初始化 Milvus 向量存储
     print(f"正在连接到 Milvus: http://{host}:{port}")
     vector_store = MilvusVectorStore(
@@ -129,6 +135,7 @@ def process_all_md_files(
         dim=embedding_dim,
         overwrite=True,
     )
+
     print("MilvusVectorStore 初始化成功。")
 
     # 5. 构建索引并存入 Milvus
