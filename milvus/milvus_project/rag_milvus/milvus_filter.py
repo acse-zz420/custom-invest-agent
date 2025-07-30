@@ -1,16 +1,14 @@
 import numpy as np
+from nltk.inference.prover9 import expressions
+
 from tool import timer
-from pymilvus import Collection, connections, utility
 from transformers import AutoModel, AutoTokenizer
 from typing import Dict, List, Optional, Any
 from milvus_construct import get_sentence_embedding
-from llm import VolcengineLLM
-from llama_index.retrievers.bm25 import BM25Retriever
-from llama_index.core.retrievers.fusion_retriever import QueryFusionRetriever
-from llama_index.core.schema import TextNode,NodeWithScore
-from llama_index.core import VectorStoreIndex,Settings
-from llama_index.vector_stores.milvus import MilvusVectorStore
-from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+from pymilvus import MilvusClient, connections, Collection, utility
+from pymilvus.model.sparse.bm25.tokenizers import build_default_analyzer
+from llama_index.core.schema import TextNode
+
 
 
 def normalize_vector(vector: np.ndarray) -> List[float]:
@@ -19,9 +17,14 @@ def normalize_vector(vector: np.ndarray) -> List[float]:
         return vector.tolist()
     return (vector / np.linalg.norm(vector)).tolist()
 
+
 @timer
-def _build_filter_expression(filters: List[Dict], logic_operator: str) -> Optional[str]:
-    """根据筛选条件列表构建 Milvus 查询表达式 (expr)。"""
+def _build_filter_expression(filters: Optional[List[Dict]]) -> Optional[str]:
+    """
+    将列表形式的过滤条件转换为能正确访问 JSON 动态字段的 Milvus 布尔表达式。
+
+    所有条件默认使用 "and" 连接。
+    """
     if not filters:
         return None
 
@@ -31,42 +34,59 @@ def _build_filter_expression(filters: List[Dict], logic_operator: str) -> Option
         op = f.get("operator")
         value = f.get("value")
 
-        if not all([field, op, value]):
-            continue
+        if not field or not op:
+            raise ValueError(f"过滤条件格式错误，缺少 'field' 或 'operator': {f}")
 
+        # 所有元数据都存储在名为 'metadata' 的JSON字段下
         milvus_field = f'metadata["{field}"]'
-        # 对字符串值进行处理，避免注入和语法错误
-        if op in ["==", "!="]:
+
+        expr = ""
+        # 1. 操作符: ==, !=, >, >=, <, <=
+        if op in ["==", "!=", ">", ">=", "<", "<="]:
             if isinstance(value, str):
-                expressions.append(f'{milvus_field} {op} "{value}"')
-            else:  # for numbers or booleans
-                expressions.append(f'{milvus_field} {op} {value}')
-        elif op == "like":
-            expressions.append(f'{milvus_field} like "{value}"')
-        elif op in ["in", "not in"]:
-            if isinstance(value, list) and all(isinstance(v, str) for v in value):
-                value_list = ",".join(f'"{v}"' for v in value)
-                expressions.append(f"{milvus_field} {op} [{value_list}]")
-            elif isinstance(value, list):  # for lists of numbers
-                value_list = ",".join(str(v) for v in value)
-                expressions.append(f"{milvus_field} {op} [{value_list}]")
-        elif op in [">", ">=", "<", "<="]:
-            if isinstance(value, str):
-                expressions.append(f'{milvus_field} {op} "{value}"')
+                expr = f"{milvus_field} {op} '{value}'"
             else:
-                expressions.append(f'{milvus_field} {op} {value}')
+                expr = f"{milvus_field} {op} {value}"
+
+        # 2. 操作符: like
+        elif op == "like":
+            if not isinstance(value, str):
+                raise ValueError(f"'like' 操作符的值必须是字符串: {f}")
+            expr = f"{milvus_field} like '{value}'"
+
+        # 3. 操作符: in, not in
+        elif op in ["in", "not in"]:
+            if not isinstance(value, list):
+                raise ValueError(f"'{op}' 操作符的值必须是列表: {f}")
+
+            if not value:
+                expr = "false" if op == "in" else "true"
+            else:
+                formatted_values = [f"'{v}'" if isinstance(v, str) else str(v) for v in value]
+                value_list_str = ",".join(formatted_values)
+                expr = f"{milvus_field} {op} [{value_list_str}]"
+
+        # 4. 自定义操作符: like_any
         elif op == "like_any":
-            # 处理自定义的 'like_any' 操作符
-            if isinstance(value, list) and value:
-                sub_expressions = [f'{milvus_field} like "%{v}%"' for v in value]
+            if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+                raise ValueError(f"'like_any' 操作符的值必须是字符串列表: {f}")
+
+            if not value:
+                expr = "false"
+            else:
+                sub_expressions = [f"{milvus_field} like '%{v}%'" for v in value]
                 or_expression = " or ".join(sub_expressions)
-                expressions.append(f"({or_expression})")
+                expr = f"({or_expression})"
+
+        else:
+            raise ValueError(f"不支持的运算符: '{op}'")
+
+        expressions.append(expr)
 
     if not expressions:
         return None
 
-    separator = f" {logic_operator} "
-    return separator.join(f"({expr})" for expr in expressions)
+    return " and ".join(expressions)
 
 @timer
 def query_milvus(
@@ -117,12 +137,12 @@ def query_milvus(
         collection.load()
 
         # 构建元数据筛选表达式
-        filter_expr = _build_filter_expression(filters, logic_operator)
+        filter_expr = _build_filter_expression(filters)
         print(f"生成的筛选表达式 (expr): {filter_expr}")
 
         # 获取所有字段名用于输出，除了向量字段
-        output_fields = [field.name for field in collection.schema.fields if
-                         not field.is_primary and field.name != "embedding"]
+        fields_to_exclude = {"embedding", "sparse_embedding"}
+        output_fields = [field.name for field in collection.schema.fields if field.name not in fields_to_exclude ]
 
         # --- 根据是否有 query_text 决定执行逻辑 ---
         if query_text:
@@ -149,7 +169,7 @@ def query_milvus(
             final_results = []
             for hit in search_results[0]:
                 if hit.distance >= search_threshold:
-                    record = {field: hit.entity.get(field) for field in output_fields}
+                    record = hit.entity
                     record["similarity_score"] = hit.distance  # 返回相似度分数
                     final_results.append(record)
 
@@ -217,70 +237,132 @@ def get_all_nodes_from_milvus(collection_name: str, host: str, port: str) -> Lis
 def run_hybrid_search(
         collection_name: str,
         query_text: str,
-        logic_operator: str,
-        embedding_model_path,
+        dense_embedding_function: object,  # 密集向量编码器实例
+        embedding_model_path: str,
         host: str = "localhost",
         port: str = "19530",
-        filters: Optional[List[Dict]] = None,
         top_k: int = 10,
-):
+        filters: Optional[List[Dict]] = None,
+        pk_field: str = "doc_id",
+        text_field: str = "text"):
     """
-    执行一个优化的混合搜索：语义+关键词+元数据过滤。
-    """
-    print("--- 启动混合搜索流程 ---")
+    使用 PyMilvus 原生稀疏向量功能执行带有元数据过滤的混合搜索。
 
-    # --- 1. 初始化向量存储和索引 ---
-    vector_search_results = query_milvus(
-        collection_name=collection_name,
-        filters=filters,
-        logic_operator=logic_operator,
-        query_text=query_text,
-        embedding_model_path=embedding_model_path,
-        top_k=top_k,
-        host=host,
-        port=port
-    )
-    if not vector_search_results or (
-            "message" in vector_search_results[0] and vector_search_results[0]["message"] == "无满足条件的结果"):
-        print("第一阶段（向量检索）未找到任何结果，流程终止。")
+    此函数执行两次独立的、经过预过滤的搜索（一次密集，一次稀疏），
+    然后合并结果，以分别显示语义分数和BM25分数。
+
+    Args:
+        collection_name (str): Milvus 集合名称。
+        query_text (str): 用户查询。
+        dense_embedding_function: 密集向量编码器实例。
+        embedding_model path: 密集向量编码器本地路径
+        filters (Optional[str]): Milvus 的布尔表达式，用于在搜索前过滤数据。
+            例如: "category == 'tech' and year > 2023"
+            这个过滤器会应用到语义搜索和关键词搜索两个阶段。
+    """
+    print("--- 启动 PyMilvus 原生混合搜索流程 (稀疏向量模型 + 过滤器) ---")
+
+    # --- 1. 初始化连接和功能组件 ---
+    try:
+        client = MilvusClient(uri=f"http://{host}:{port}")
+        if not connections.has_connection("default"):
+            connections.connect("default", host=host, port=port)
+        collection = Collection(collection_name)
+    except Exception as e:
+        print(f"连接或加载 Milvus 集合时出错: {e}")
         return []
 
-    filtered_nodes: Dict[str, TextNode] = {}
-    for res_dict in vector_search_results:
-        non_metadata_keys = {"doc_id", "text", "similarity_score", "id"}
-        metadata = {k: v for k, v in res_dict.items() if k not in non_metadata_keys}
 
-        node_id = res_dict.get("doc_id")
-        node = TextNode(id_=node_id, text=res_dict.get("text", ""), metadata=metadata)
-        filtered_nodes[node_id] = node
-    print(f"向量检索完成，找到 {len(filtered_nodes)} 个结果。")
+    # --- 生成查询向量 ---
+    print(f"查询文本: '{query_text}'")
+    filter_expr = _build_filter_expression(filters)
+    if filters:
+        print(f"应用过滤器: '{filter_expr}'")
 
-    # b) BM25 检索器 (处理关键字搜索)
-    filtered_nodes_list = list(filtered_nodes.values())  # 转换为 TextNode 列表
-    bm25_retriever = BM25Retriever.from_defaults(
-        nodes=filtered_nodes_list,
-        similarity_top_k=top_k
+    # a) 生成密集向量
+    embedding_tokenizer = AutoTokenizer.from_pretrained(embedding_model_path, local_files_only=True)
+    embedding_model = AutoModel.from_pretrained(embedding_model_path, local_files_only=True)
+    dense_query_vector = get_sentence_embedding(query_text, embedding_model, embedding_tokenizer)
+
+    # --- 执行两次独立的、带过滤的搜索 ---
+
+    # a) 密集向量（语义）搜索
+    print("\n--- 阶段 1: 执行经过滤的密集（语义）搜索 ---")
+    dense_results = client.search(
+        data=[normalize_vector(dense_query_vector)],
+        anns_field="embedding",
+        limit=top_k,
+        filter=filter_expr,
+        search_params={"metric_type": "IP", "params": {"drop_ratio_search": 0.2}},
+        collection_name=collection_name,
+        output_fields=[pk_field, text_field]
     )
-    bm25_results: List[NodeWithScore] = bm25_retriever.retrieve(query_text)
-    print(f"BM25检索完成，找到 {len(bm25_results)} 个结果。")
+    print(f"在满足过滤器的文档中，密集搜索找到 {len(dense_results[0])} 个语义相关结果。")
 
-    final_results: List[NodeWithScore] = []
-    for bm25_hit in bm25_results:
-        # BM25的分数大于0，说明是有效匹配
-        if bm25_hit.score >= 0:
-            final_results.append(bm25_hit)
+    # b) 稀疏向量（关键词）搜索
+    print("\n--- 阶段 2: 执行经过滤的稀疏（BM25）搜索 ---")
+    sparse_results = client.search(
+        data=[query_text],  # 直接传入原始查询文本
+        anns_field="sparse_embedding",
+        limit=top_k,
+        filter=filter_expr,
+        search_params={"metric_type": "BM25", "params": {"drop_ratio_search": 0.2}},
+        collection_name=collection_name,
+        output_fields=[pk_field, text_field]
+    )
+    print(f"在满足过滤器的文档中，BM25搜索找到 {len(sparse_results[0])} 个关键词匹配结果。")
 
-    # --- 4. 执行检索 ---
-    if not final_results:
-        print("在候选节点中，没有找到与关键词也匹配的结果。")
+    # --- 4. 合并并展示结果 ---x
+    print("\n--- 阶段 3: 合并和格式化两次搜索的结果 ---")
 
-    for i, res in enumerate(final_results):
-        print(f"[{i + 1}] BM25 Score: {res.score:.4f} (关键词匹配分数)")
-        print(f"    DOC ID: {res.node.id_}")
-        print(f"    Text: {res.node.text[:150].strip()}...")
+    final_results: Dict[str, Dict] = {}
+
+    # 处理密集搜索结果
+    for hit in dense_results[0]:
+        doc_id = hit["id"]
+        final_results[doc_id] = {
+            "id": doc_id,
+            "text": hit["entity"][text_field],
+            "semantic_score": hit["distance"],
+            "bm25_score": 0.0,
+            "found_by": ["semantic"]
+        }
+
+    # 处理并合并稀疏搜索结果
+    for hit in sparse_results[0]:
+        doc_id = hit["id"]
+        bm25_score = hit["distance"]
+
+        if doc_id in final_results:
+            final_results[doc_id]["bm25_score"] = bm25_score
+            final_results[doc_id]["found_by"].append("bm25")
+        else:
+            final_results[doc_id] = {
+                "id": doc_id,
+                "text": hit["entity"][text_field],
+                "semantic_score": -1.0,
+                "bm25_score": bm25_score,
+                "found_by": ["bm25"]
+            }
+    # 按 BM25 分数 + 语义分数综合排序
+    sorted_results = sorted(
+        list(final_results.values()),
+        key=lambda x: x["bm25_score"] + x["semantic_score"],
+        reverse=True
+    )
+
+    print("\n--- 混合搜索完成，最终结果 (所有结果均满足过滤器条件): ---")
+    if not sorted_results:
+        print("没有找到任何满足所有条件的结果。")
+
+    for i, res in enumerate(sorted_results):
+        print(f"[{i + 1}] Doc ID: {res['id']} (Found by: {', '.join(res['found_by'])})")
+        print(f"    Semantic Score (IP distance): {res['semantic_score']:.4f}")
+        print(f"    BM25 Score: {res['bm25_score']:.4f}")
+        print(f"    Text: {res['text'][:150].strip() if res['text'] else 'N/A'}...")
         print("-" * 20)
 
-    return final_results
+    return sorted_results
 
 
 if __name__ == "__main__":
@@ -288,8 +370,8 @@ if __name__ == "__main__":
     api_key = "ff6acab6-c747-49d7-b01c-2bea59557b8d"
     COLLECTION = "financial_reports"
 
-    # 示例 1: 元数据筛选 (AND 逻辑) + 语义搜索
-    print("\n--- 示例 1: 语义搜索 + 复合筛选 (AND) ---")
+    # 示例 1: 元数据筛选  + 语义搜索
+    print("\n--- 示例 1: 语义搜索 + 复合筛选 ---")
     complex_filters = [
         {"field": "institution", "operator": "in", "value": ["中金公司", "华泰证券"]},
         {"field": "report_type", "operator": "like", "value": "%宏观%"},
@@ -307,8 +389,8 @@ if __name__ == "__main__":
     for res in results1:
         print(res)
 
-    # 示例 2: 仅元数据筛选 (OR 逻辑)
-    print("\n--- 示例 2: 仅元数据筛选 (OR) ---")
+    # 示例 2: 仅元数据筛选
+    print("\n--- 示例 2: 仅元数据筛选 ---")
     or_filters = [
         {"field": "institution", "operator": "==", "value": "华创证券"},
         {"field": "title", "operator": "like", "value": "%宏观%"}
@@ -336,11 +418,21 @@ if __name__ == "__main__":
 
     #示例 : 混合搜索(BM25)
     print("\n--- 示例 4: 混合搜索(BM25)")
+
+    analyzer = build_default_analyzer(language="zh")
+
+    # --- 把你导致问题的查询文本放在这里 ---
+    test_query = "针对房地产政策，有哪些可以完善的地方"
+    # test_query = "你好" # 也可以试试这个
+
+    # 调用分词器，看看它输出了什么
+    processed_tokens = analyzer(test_query)
+
     results4 = run_hybrid_search(
         collection_name=COLLECTION,
-            query_text="针对中国房地产政策，有哪些改善的地方",
+        query_text="针对房地产政策，有哪些可以完善的地方",
+        dense_embedding_function=get_sentence_embedding,
         embedding_model_path=EMBEDDING_MODEL_PATH,
-        logic_operator="and",
         filters=complex_filters,
         top_k=5
     )

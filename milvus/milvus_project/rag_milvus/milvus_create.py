@@ -1,10 +1,9 @@
 import re
-import time
+import jieba
 import os
 from pathlib import Path
 from typing import List, Tuple
 
-from sqlalchemy.testing.suite.test_reflection import metadata
 
 from tool import timer
 
@@ -22,12 +21,12 @@ from llama_index.core import (
 )
 from llama_index.core.prompts import PromptTemplate
 from llama_index.vector_stores.milvus import MilvusVectorStore
+from llama_index.vector_stores.milvus.base import  BM25BuiltInFunction
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
-from pymilvus import CollectionSchema, FieldSchema, DataType, Collection, utility, connections
 
 # Transformers 模块
 from transformers import AutoConfig
-
+from pymilvus.model.sparse import BM25EmbeddingFunction
 from prompt import chunk_extract_prompt_new
 
 os.environ['MODELSCOPE_CACHE'] = 'D:/my_custom_cache/modelscope'
@@ -51,7 +50,7 @@ def process_all_md_files(
     """
     处理指定目录下的所有Markdown文件，提取、分块，并将结果通过LlamaIndex存入Milvus Standalone。
 
-    此函数已适配Milvus Standalone，并采用LlamaIndex的最佳实践，让索引自动处理嵌入生成。
+    支持稠密向量（embedding）和稀疏向量（sparse_embedding）
 
     Args:
         md_dir (str): Markdown文件所在的目录。
@@ -71,6 +70,13 @@ def process_all_md_files(
     config = AutoConfig.from_pretrained(embedding_model_path, local_files_only=True)
     embedding_dim = config.hidden_size
     print(f"自动检测到嵌入维度: {embedding_dim}")
+
+    bm25_function = BM25BuiltInFunction(
+        input_field_names="text",
+        output_field_names="sparse_embedding",
+        analyzer_params={"type":"chinese"},
+        enable_match=True  # 启用精确匹配
+    )
 
     prompt = PromptTemplate(chunk_prompt)
     all_documents = []
@@ -105,7 +111,6 @@ def process_all_md_files(
 
         for i, (_, chunk_text) in enumerate(valid_chunks):
             chunk_id = f"{file_id}_{i}"
-
             # 构造 Document 节点
             node = Document(
                 text=chunk_text,
@@ -115,7 +120,7 @@ def process_all_md_files(
                         "file_name": filename,
                         "file_id": file_id,
                         **full_struct  # 数据结构
-                    }
+                    },
                 }
             )
             all_documents.append(node)
@@ -134,6 +139,14 @@ def process_all_md_files(
         collection_name=collection_name,
         dim=embedding_dim,
         overwrite=True,
+        enable_dense=True,
+        embedding_field="embedding",
+        enable_sparse=True,  # 启用稀疏向量支持
+        sparse_embedding_field="sparse_embedding",
+        sparse_embedding_function=bm25_function,
+        index_config={"index_type": "HNSW", "metric_type": "IP", "params": {"M": 16, "efConstruction": 200}},
+        sparse_index_config={"index_type": "SPARSE_INVERTED_INDEX", "metric_type": "BM25"},
+        similarity_metric="IP"
     )
 
     print("MilvusVectorStore 初始化成功。")
