@@ -319,9 +319,9 @@ def run_hybrid_search(
 
     # 处理密集搜索结果
     for hit in dense_results[0]:
-        doc_id = hit["id"]
+        doc_id = hit["doc_id"]
         final_results[doc_id] = {
-            "id": doc_id,
+            "doc_id": doc_id,
             "text": hit["entity"][text_field],
             "semantic_score": hit["distance"],
             "bm25_score": 0.0,
@@ -330,7 +330,7 @@ def run_hybrid_search(
 
     # 处理并合并稀疏搜索结果
     for hit in sparse_results[0]:
-        doc_id = hit["id"]
+        doc_id = hit["doc_id"]
         bm25_score = hit["distance"]
 
         if doc_id in final_results:
@@ -338,7 +338,7 @@ def run_hybrid_search(
             final_results[doc_id]["found_by"].append("bm25")
         else:
             final_results[doc_id] = {
-                "id": doc_id,
+                "doc_id": doc_id,
                 "text": hit["entity"][text_field],
                 "semantic_score": -1.0,
                 "bm25_score": bm25_score,
@@ -356,7 +356,7 @@ def run_hybrid_search(
         print("没有找到任何满足所有条件的结果。")
 
     for i, res in enumerate(sorted_results):
-        print(f"[{i + 1}] Doc ID: {res['id']} (Found by: {', '.join(res['found_by'])})")
+        print(f"[{i + 1}] Doc ID: {res['doc_id']} (Found by: {', '.join(res['found_by'])})")
         print(f"    Semantic Score (IP distance): {res['semantic_score']:.4f}")
         print(f"    BM25 Score: {res['bm25_score']:.4f}")
         print(f"    Text: {res['text'][:150].strip() if res['text'] else 'N/A'}...")
