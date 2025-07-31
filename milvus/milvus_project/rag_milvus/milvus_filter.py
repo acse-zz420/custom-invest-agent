@@ -1,16 +1,12 @@
 import numpy as np
-from nltk.inference.prover9 import expressions
-
 from tool import timer
-from transformers import AutoModel, AutoTokenizer
 from typing import Dict, List, Optional, Any
 from milvus_construct import get_sentence_embedding
 from pymilvus import MilvusClient, connections, Collection, utility
-from pymilvus.model.sparse.bm25.tokenizers import build_default_analyzer
 from llama_index.core.schema import TextNode
 from config import *
 
-tokenizer,model,_ =  get_embedding_model()
+model, tokenizer, _= get_embedding_model()
 
 def normalize_vector(vector: np.ndarray) -> List[float]:
     """归一化向量以支持 IP 度量，使其等效于余弦相似度。"""
@@ -93,7 +89,6 @@ def _build_filter_expression(filters: Optional[List[Dict]]) -> Optional[str]:
 def query_milvus(
         collection_name: str,
         filters: Optional[List[Dict]] = None,
-        logic_operator: str = "and",
         query_text: Optional[str] = None,
         embedding_model_path: Optional[str] = None,
         top_k: int = 10,
@@ -149,7 +144,6 @@ def query_milvus(
         if query_text:
             # 一：语义搜索 (可结合元数据筛选)
             print(f"正在执行语义搜索: '{query_text}'")
-
 
             query_embedding_raw = get_sentence_embedding(query_text, model, tokenizer)
             query_embedding = normalize_vector(query_embedding_raw)
@@ -267,6 +261,7 @@ def run_hybrid_search(
         client = MilvusClient(uri=f"http://{host}:{port}")
         if not connections.has_connection("default"):
             connections.connect("default", host=host, port=port)
+            print("Milvus 连接成功。")
         collection = Collection(collection_name)
     except Exception as e:
         print(f"连接或加载 Milvus 集合时出错: {e}")
@@ -280,9 +275,7 @@ def run_hybrid_search(
         print(f"应用过滤器: '{filter_expr}'")
 
     # a) 生成密集向量
-    embedding_tokenizer = AutoTokenizer.from_pretrained(embedding_model_path, local_files_only=True)
-    embedding_model = AutoModel.from_pretrained(embedding_model_path, local_files_only=True)
-    dense_query_vector = get_sentence_embedding(query_text, embedding_model, embedding_tokenizer)
+    dense_query_vector = get_sentence_embedding(query_text, model, tokenizer)
 
     # --- 执行两次独立的、带过滤的搜索 ---
 
@@ -379,7 +372,6 @@ if __name__ == "__main__":
     results1 = query_milvus(
         collection_name=COLLECTION,
         filters=complex_filters,
-        logic_operator="and",
         query_text="针对中国房地产政策，有哪些不足和可以改善的地方",
         embedding_model_path=EMBEDDING_MODEL_PATH,
         top_k=5,
@@ -397,7 +389,6 @@ if __name__ == "__main__":
     results2 = query_milvus(
         collection_name=COLLECTION,
         filters=or_filters,
-        logic_operator="or",
         top_k=5
     )
     for res in results2:

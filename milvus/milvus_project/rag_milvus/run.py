@@ -1,84 +1,90 @@
 import json
-import time
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Literal, Any
+from tool import timer
 from llm import VolcengineLLM
 from query_split import parse_query_to_json
-from milvus_filter import query_milvus
-from reranker import rerank_results, load_reranker
+from milvus_filter import query_milvus, run_hybrid_search, get_sentence_embedding
+from reranker import rerank_results
+from config import *
 
 
-def build_filters_from_llm_result(
-        parsed_result: Dict,
-        filterable_fields: List[str]
-) -> List[Dict]:
+def build_complex_filters(
+        parsed_result: Dict[str, Any],
+        filter_fields: List[str]
+) -> List[Dict[str, Any]]:
     """
-    根据query_split解析出的字典，为指定的字段构建适配 query_milvus 的筛选器列表。
+    将LLM解析出的字典，转换成一个复杂的、适配下游处理的筛选器列表。
 
     Args:
-        parsed_result (Dict): 从LLM解析出的键值对结果。
-        filterable_fields (List[str]): 一个列表，包含应该被用于创建筛选器的字段名称。
+        parsed_result (Dict[str, Any]): 从LLM解析出的键值对结果。
+        filter_fields (List[str]): 一个列表，包含应该被用于创建筛选器的字段名称。
 
     Returns:
-        List[Dict]: 用于 milvus_filter.query_milvus 的筛选器列表。
+        List[Dict[str, Any]]: 一个结构化的筛选器列表。
     """
     filters = []
+    # 定义用于分割多值字段的分隔符
     delimiters = [",", "、", "/", " "]
 
     for field, value in parsed_result.items():
-        if field not in filterable_fields:
+        # 1. 跳过不需要或无效的字段
+        if field not in filter_fields:
             continue
-        if not value or value in ["无", "不明确", "未提及"]:
+        if not value or value in ["无", "不明确", "未提及", "None"]:
             continue
 
-        # --- 日期范围 ---
-        if field == "date_range" and "至" in value:
+        # 2. 特殊处理：日期范围 (date_range)
+        # 日期范围的字段名为 'date_range'，实际作用于 'date' 字段
+        if field == "date_range" and "至" in str(value):
             try:
-                start_date, end_date = value.split("至")
-                filters.append({"field": "date", "operator": ">=", "value": start_date.strip()})
-                filters.append({"field": "date", "operator": "<=", "value": end_date.strip()})
+                start_date, end_date = str(value).split("至")
+                start_date, end_date = start_date.strip(), end_date.strip()
+                if start_date:
+                    filters.append({"field": "date", "operator": ">=", "value": start_date})
+                if end_date:
+                    filters.append({"field": "date", "operator": "<=", "value": end_date})
             except ValueError:
                 print(f"警告：无法解析日期范围 '{value}'")
+            # 处理完日期范围后跳过后续的通用逻辑
             continue
 
-        # 1. 无论输入是 "A" 还是 "A,B"，都先将其拆分为一个值列表。
+        # 3. 通用逻辑：处理其他字段
+
+        # 尝试按分隔符拆分，以处理多值情况
         query_values = []
-        # 找到第一个存在的分隔符
-        used_delimiter = next((d for d in delimiters if d in str(value)), None)
+        # 将值转换为字符串以使用 in 操作符
+        str_value = str(value)
+        used_delimiter = next((d for d in delimiters if d in str_value), None)
 
         if used_delimiter:
-            query_values = [v.strip() for v in str(value).split(used_delimiter) if v.strip()]
+            query_values = [v.strip() for v in str_value.split(used_delimiter) if v.strip()]
         else:
-            # 如果没有分隔符，说明是单值，也放入列表中
-            query_values = [str(value).strip()]
+            # 如果没有分隔符，说明是单值，也统一放入列表中处理
+            query_values = [str_value.strip()]
 
-        # 2. 如果列表不为空，则创建一个 'like_any' 筛选器
-        if query_values:
-            # 它的值是一个列表，代表列表中任一元素通过LIKE匹配即可。
-            filters.append({"field": field, "operator": "like_any", "value": query_values})
+        # 根据值的数量决定使用 'in' 还是 'like'
+        if not query_values:
+            continue
+
+        if len(query_values) > 1:
+            # --- 多值情况：使用 'in' 操作符 ---
+            filters.append({"field": field, "operator": "in", "value": query_values})
+        else:
+            # --- 单值情况：使用 'like' 操作符---
+            filters.append({"field": field, "operator": "like", "value": f"%{query_values[0]}%"})
 
     return filters
 
-def deduplicate_results(results: List[dict]) -> List[dict]:
-    """根据 chunk_id 去重，保留第一个出现的记录。"""
-    seen_chunk_ids = set()
-    deduped_results = []
-    for result in results:
-        chunk_id = result.get("chunk_id")
-        if chunk_id and chunk_id not in seen_chunk_ids:
-            seen_chunk_ids.add(chunk_id)
-            deduped_results.append(result)
-    return deduped_results
 
-
+@timer
 def generate_llm_answer(
         query: str,
         retrieved_results: List[Dict],
         llm,
-        max_results: int = 5,
-        retrieval_type: str = "hybrid"  # 新增参数，说明检索类型
+        max_results: int = 5
 ) -> str:
     """
-    使用 LLM 根据检索到的文本块生成最终答案（已移除图谱RAG）。
+    使用 LLM 根据检索到的文本块生成最终答案
 
     Args:
         query (str): 用户的原始查询。
@@ -92,10 +98,7 @@ def generate_llm_answer(
     """
     # 1. 处理没有检索到结果的情况
     if not retrieved_results or (len(retrieved_results) == 1 and "message" in retrieved_results[0]):
-        if retrieval_type == "metadata":
-            return "根据您提供的筛选条件，未能找到相关的文档。"
-        else:
-            return "抱歉，未能在知识库中找到与您问题高度相关的文本信息来生成答案。"
+        return "抱歉，未能在知识库中找到符合筛选条件的高度相关的文本信息来生成答案。"
 
     # 2. 构建上下文信息 (Context String)
     context_str = ""
@@ -109,14 +112,14 @@ def generate_llm_answer(
             score_type = "重排相关分" if 'rerank_score' in result else "向量相似分"
             context_str += f"来源文档ID: {result.get('file_id', '未知')}, {score_type}: {score:.4f}\n"
 
-        context_str += f"内容: {result.get('chunk_text', '').strip()}\n\n"
+        context_str += f"内容: {result.get('text', '').strip()}\n\n"
 
     # 3. 设计 Prompt 模板
     final_prompt = f"""你是一位顶级的金融分析专家，任务是根据提供的参考资料来精准、深入地回答用户的问题。
 
     ### 用户问题:
     {query}
-    
+
     ### 参考资料:
     {context_str}
     ### 任务要求:
@@ -125,7 +128,7 @@ def generate_llm_answer(
     3.  如果资料内容不足以回答问题，请如实说明“根据当前资料无法回答该问题”。
     4.  在回答中，你可以通过 `[参考资料 n]` 的格式来引用信息的来源，以增强回答的可信度。
     5.  请条理清晰、逻辑严谨地组织你的答案。
-    
+
     请开始你的回答：
     """
 
@@ -138,80 +141,138 @@ def generate_llm_answer(
         return "抱歉，在生成答案的过程中遇到了一个内部错误。"
 
 
+@timer
+def execute_rag_pipeline(
+        query: str,
+        llm: object,  # LLM 客户端实例
+        collection_name: str,
+        embedding_model_path: str,  # 嵌入模型路径
+        search_strategy: Literal["normal", "hybrid"] = "hybrid",  # 关键参数：选择检索策略
+        filter_fields: Optional[List[str]] = None,
+        top_k_retrieval: int = 50,  # 初始检索数量
+        top_k_llm: int = 5,  # 交给LLM的数量
+        search_threshold: float = 0.5,  # 语义搜索阈值
+        use_reranker: bool = True,  # 是否启用重排器
+        # --- 混合搜索专用参数 ---
+        dense_embedding_function: Optional[object] = None,  # 仅在 hybrid 模式下需要
+):
+    """
+    执行一个完整的、可配置的 RAG（检索增强生成）流程。
+
+    Args:
+        query (str): 用户的原始查询。
+        llm (object): LLM 客户端实例。
+        collection_name (str): Milvus 集合名称。
+        embedding_model_path (str): 密集嵌入模型的路径 (用于 query_milvus)。
+        search_strategy (Literal["semantic", "hybrid"]):
+            - "semantic": 使用纯语义搜索结合元数据过滤 (调用 query_milvus)。
+            - "hybrid": 使用语义+关键词混合搜索结合元数据过滤 (调用 run_hybrid_search)。
+        filter_fields (Optional[List[str]]): 用于从查询中提取的元数据字段列表。
+        top_k_retrieval (int): 初始检索返回的结果数量。
+        top_k_rerank (int): 重排后保留的结果数量。
+        top_k_llm (int): 最终交给 LLM 用于生成答案的上下文数量。
+        search_threshold (float): 语义搜索的相似度阈值。
+        use_reranker (bool): 是否启用 Reranker 进行结果重排。
+        dense_embedding_function (Optional[object]): 混合搜索所需的密集编码器实例。
+
+    Returns:
+        str: LLM 生成的最终答案。
+    """
+
+    # --- 1. LLM 解析查询以提取元数据 ---
+    print(f"--- 阶段 1: 解析查询 ---")
+    print(f"原始查询: {query}")
+    if filter_fields:
+        parse_result_json = parse_query_to_json(query, llm)
+        parsed_result = parse_result_json.get("parsed_result", {})
+        print(f"LLM解析结果: {json.dumps(parsed_result, ensure_ascii=False, indent=2)}")
+        filters = build_complex_filters(parsed_result, filter_fields)
+        print(f"生成的Milvus筛选器: {filters}")
+    else:
+        filters = ""  # 如果不提供 filter_fields，则不进行元数据筛选
+        print("未配置元数据筛选。")
+
+    # --- 2. 根据策略选择并执行检索 ---
+    print(f"\n--- 阶段 2: 执行检索 (策略: {search_strategy}) ---")
+    retrieved_results = []
+
+    if search_strategy == "semantic":
+        retrieved_results = query_milvus(
+            collection_name=collection_name,
+            filters=filters,
+            query_text=query,
+            embedding_model_path=embedding_model_path,
+            top_k=top_k_retrieval,
+            search_threshold=search_threshold
+        )
+
+    elif search_strategy == "hybrid":
+        retrieved_results = run_hybrid_search(
+            collection_name=collection_name,
+            query_text=query,
+            embedding_model_path=embedding_model_path,  # 假设 hybrid search 也需要
+            filters=filters,
+            top_k=top_k_retrieval,
+            dense_embedding_function=dense_embedding_function
+        )
+
+    else:
+        raise ValueError(f"不支持的 search_strategy: '{search_strategy}'. 请选择 'semantic' 或 'hybrid'。")
+
+    print(f"初步检索到 {len(retrieved_results)} 条结果。")
+
+    # --- 3. 结果重排 (可选) ---
+    if use_reranker and retrieved_results and "message" not in retrieved_results[0]:
+        print(f"\n--- 阶段 3: 执行重排 ---")
+        reranker_model, reranker_tokenizer = get_reranker_model()
+        final_retrieved_docs = rerank_results(
+            results=retrieved_results,
+            query=query,
+            model=reranker_model,
+            tokenizer=reranker_tokenizer
+        )
+        print(f"重排后保留 {len(final_retrieved_docs)} 条结果。")
+    else:
+        # 如果不使用重排器，直接使用原始检索结果
+        final_retrieved_docs = retrieved_results[:top_k_rerank]
+
+    # --- 4. LLM 生成最终答案 ---
+    print(f"\n--- 阶段 4: 生成最终答案 ---")
+    final_answer = generate_llm_answer(
+        query=query,
+        retrieved_results=final_retrieved_docs,
+        llm=llm,
+        max_results=top_k_llm
+    )
+
+    return final_answer
+
 
 if __name__ == "__main__":
+    query = "根据宏观研究,分析亚洲货币升值意味着什么？"
+    llm = VolcengineLLM(api_key=API_KEY)
 
-    start_time = time.time()
-
-    # --- 1. 初始化 ---
-    llm = VolcengineLLM(api_key="ff6acab6-c747-49d7-b01c-2bea59557b8d")
-    embedding_model_path = r"D:\yechuan\work\cjsx\model\Qwen3-Embedding-0.6B"
-    reranker_model_path = r"D:\yechuan\work\cjsx\model\bge-reranker-large"
-
-    query = "针对中国房地产政策的相关宏观研究，哪些不足和可以改善的地方"
-
-    # --- 2. LLM 解析查询 ---
-    print(f"原始查询: {query}")
-    parse_result_json = parse_query_to_json(query, llm)
-    parsed_result = parse_result_json.get("parsed_result", {})
-    print(f"LLM解析结果: {json.dumps(parsed_result, ensure_ascii=False, indent=2)}")
-
-    # --- 3. 构建 Milvus 筛选器 ---
     filter_fields = [
         "institution",
         "report_type",
-        "industry",
         "authors",
         "date_range"
     ]
-    filters = build_filters_from_llm_result(parsed_result,filter_fields)
-    print(f"生成的Milvus筛选器: {filters}")
 
-    # --- 4. Milvus 混合搜索 ---
-    # 同时使用语义查询 (query_text) 和元数据筛选 (filters)
-    milvus_results = query_milvus(
-        collection_name="financial_reports",
-        filters=filters,
-        logic_operator="and",  # 多个筛选条件之间使用 AND
-        query_text=query,  # 使用原始查询进行语义搜索
-        embedding_model_path=embedding_model_path,
-        top_k=50,
-        search_threshold=0.5  # IP相似度阈值
-    )
-
-    # --- 5. 结果去重和重排 ---
-    deduped_results = deduplicate_results(milvus_results)
-    print(f"Milvus 返回 {len(milvus_results)} 个结果, 去重后剩 {len(deduped_results)} 个。")
-
-    if deduped_results and "message" not in deduped_results[0]:
-        print("正在使用Reranker对结果进行重排...")
-        reranker_model, reranker_tokenizer = load_reranker(reranker_model_path)
-        reranked_results = rerank_results(
-            results=deduped_results,
-            query=query,
-            model=reranker_model,
-            tokenizer=reranker_tokenizer,
-            top_k=10
-        )
-        print("重排完成。")
-    else:
-        reranked_results = []
-
-    # --- 6. LLM 生成最终答案 ---
-    print("正在生成最终答案...")
-
-    # 可以根据执行的步骤来确定 retrieval_type
-    # 在这个完整的流程中，执行了混合搜索，所以是 'hybrid'
-    final_answer = generate_llm_answer(
+    print("开始执行RAG流程 (策略: Hybrid)...")
+    print("=" * 50)
+    hybrid_answer = execute_rag_pipeline(
         query=query,
-        retrieved_results=reranked_results,  # 传入重排后的结果
         llm=llm,
-        max_results=5,  # 使用重排后得分最高的5个结果
-        retrieval_type="hybrid"
+        collection_name="financial_reports",
+        embedding_model_path=EMBEDDING_MODEL_PATH,
+        search_strategy="hybrid",
+        filter_fields=filter_fields,
+        top_k_retrieval=50,
+        top_k_llm=5,
+        dense_embedding_function=get_sentence_embedding
     )
 
-    # ... (后面的打印和输出部分保持不变) ...
-    print("\nLLM 生成的最终答案：\n")
-    print(final_answer)
-    end_time = time.time()
-    print(f"✅ 查询完成 (总耗时: {end_time - start_time:.2f} 秒)")
+    print("\n\n【混合搜索】LLM 生成的最终答案：\n")
+    print(hybrid_answer)
+

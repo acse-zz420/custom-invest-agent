@@ -1,14 +1,6 @@
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
+from rag_milvus.config import get_reranker_model
 import torch
 from typing import List, Dict
-
-
-def load_reranker(model_path: str):
-    """加载本地 reranker 模型和 tokenizer"""
-    tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
-    model = AutoModelForSequenceClassification.from_pretrained(model_path, local_files_only=True)
-    model.eval()  # 设置为评估模式
-    return model, tokenizer
 
 
 def rerank_results(results: List[Dict], query: str, model, tokenizer) -> List[Dict]:
@@ -17,13 +9,13 @@ def rerank_results(results: List[Dict], query: str, model, tokenizer) -> List[Di
 
     with torch.no_grad():  # 禁用梯度计算
         for result in results:
-            if "chunk_text" not in result or "message" in result:
+            if "text" not in result or "message" in result:
                 continue  # 跳过无效结果（如 {"message": "无"}）
 
-            # 准备输入：query 和 chunk_text 的配对
+            # 准备输入：query 和 text 的配对
             inputs = tokenizer(
                 query,
-                result["chunk_text"],
+                result["text"],
                 return_tensors="pt",
                 max_length=512,
                 truncation=True,
