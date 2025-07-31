@@ -10,6 +10,7 @@ from pymilvus.model.sparse.bm25.tokenizers import build_default_analyzer
 from llama_index.core.schema import TextNode
 from config import *
 
+tokenizer,model,_ =  get_embedding_model()
 
 def normalize_vector(vector: np.ndarray) -> List[float]:
     """归一化向量以支持 IP 度量，使其等效于余弦相似度。"""
@@ -148,13 +149,12 @@ def query_milvus(
         if query_text:
             # 一：语义搜索 (可结合元数据筛选)
             print(f"正在执行语义搜索: '{query_text}'")
-            tokenizer = AutoTokenizer.from_pretrained(embedding_model_path, local_files_only=True)
-            model = AutoModel.from_pretrained(embedding_model_path, local_files_only=True)
+
 
             query_embedding_raw = get_sentence_embedding(query_text, model, tokenizer)
             query_embedding = normalize_vector(query_embedding_raw)
 
-            search_params = {"metric_type": "IP", "params": {"nprobe": 16}}  # nprobe 可根据索引类型调整
+            search_params = {"metric_type": "IP", "params": {"nprobe": 16}}
 
             search_results = collection.search(
                 data=[query_embedding],
@@ -370,7 +370,7 @@ if __name__ == "__main__":
     COLLECTION = "financial_reports"
 
     # 示例 1: 元数据筛选  + 语义搜索
-    print("\n--- 示例 1: 语义搜索 + 复合筛选 ---")
+    print("\n--- 示例 1: 语义搜索 + 元数据过滤 ---")
     complex_filters = [
         {"field": "institution", "operator": "in", "value": ["中金公司", "华泰证券"]},
         {"field": "report_type", "operator": "like", "value": "%宏观%"},
@@ -417,15 +417,6 @@ if __name__ == "__main__":
 
     #示例 : 混合搜索(BM25)
     print("\n--- 示例 4: 混合搜索(BM25)")
-
-    analyzer = build_default_analyzer(language="zh")
-
-    # --- 把你导致问题的查询文本放在这里 ---
-    test_query = "针对房地产政策，有哪些可以完善的地方"
-    # test_query = "你好" # 也可以试试这个
-
-    # 调用分词器，看看它输出了什么
-    processed_tokens = analyzer(test_query)
 
     results4 = run_hybrid_search(
         collection_name=COLLECTION,

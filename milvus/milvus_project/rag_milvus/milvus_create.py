@@ -38,6 +38,13 @@ os.environ['MODELSCOPE_MODELS_CACHE'] = 'D:/my_custom_cache/modelscope/models'
 
 from config import *
 
+config = AutoConfig.from_pretrained(EMBEDDING_MODEL_PATH, local_files_only=True)
+embedding_dim = config.hidden_size
+print(f"自动检测到嵌入维度: {embedding_dim}")
+
+Settings.llm = VolcengineLLM(api_key=API_KEY)
+_, _, Settings.embed_model = get_embedding_model()
+
 @timer
 def process_all_md_files(
         md_dir: str,
@@ -65,12 +72,7 @@ def process_all_md_files(
     Returns:
         VectorStoreIndex: 构建好的LlamaIndex索引对象。
     """
-    Settings.llm = VolcengineLLM(api_key=api_key)
-    Settings.embed_model = HuggingFaceEmbedding(model_name=embedding_model_path)
 
-    config = AutoConfig.from_pretrained(embedding_model_path, local_files_only=True)
-    embedding_dim = config.hidden_size
-    print(f"自动检测到嵌入维度: {embedding_dim}")
 
     bm25_function = BM25BuiltInFunction(
         input_field_names="text",
@@ -141,7 +143,7 @@ def process_all_md_files(
         dim=embedding_dim,
         overwrite=True,
         enable_dense=True,
-        embedding_field="embedding",
+        embedding_field="embedding", #稠密索引
         enable_sparse=True,  # 启用稀疏向量支持
         sparse_embedding_field="sparse_embedding",
         sparse_embedding_function=bm25_function,
