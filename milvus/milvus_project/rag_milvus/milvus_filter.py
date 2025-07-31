@@ -8,7 +8,7 @@ from milvus_construct import get_sentence_embedding
 from pymilvus import MilvusClient, connections, Collection, utility
 from pymilvus.model.sparse.bm25.tokenizers import build_default_analyzer
 from llama_index.core.schema import TextNode
-
+from config import *
 
 
 def normalize_vector(vector: np.ndarray) -> List[float]:
@@ -366,8 +366,7 @@ def run_hybrid_search(
 
 
 if __name__ == "__main__":
-    EMBEDDING_MODEL_PATH = r"D:\yechuan\work\cjsx\model\Qwen3-Embedding-0.6B"
-    api_key = "ff6acab6-c747-49d7-b01c-2bea59557b8d"
+
     COLLECTION = "financial_reports"
 
     # 示例 1: 元数据筛选  + 语义搜索

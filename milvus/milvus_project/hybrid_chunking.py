@@ -1,7 +1,6 @@
 import re
 from typing import Any, List, Optional
 from langchain.text_splitter import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
-print("hello world")
 
 # （示例）模拟读入 Markdown 文本
 # from text_txt.raw_md1 import markdown_text

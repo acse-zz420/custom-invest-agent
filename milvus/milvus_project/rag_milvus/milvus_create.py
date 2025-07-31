@@ -1,5 +1,4 @@
 import re
-import jieba
 import os
 from pathlib import Path
 from typing import List, Tuple
@@ -21,7 +20,7 @@ from llama_index.core import (
 )
 from llama_index.core.prompts import PromptTemplate
 from llama_index.vector_stores.milvus import MilvusVectorStore
-from llama_index.vector_stores.milvus.base import  BM25BuiltInFunction
+from llama_index.vector_stores.milvus.base import BM25BuiltInFunction
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 
 # Transformers 模块
@@ -37,7 +36,9 @@ os.environ['MODELSCOPE_DATASETS_CACHE'] = 'D:/my_custom_cache/modelscope/dataset
 # 设置 ModelScope 模型缓存子目录（可选）
 os.environ['MODELSCOPE_MODELS_CACHE'] = 'D:/my_custom_cache/modelscope/models'
 
-@ timer
+from config import *
+
+@timer
 def process_all_md_files(
         md_dir: str,
         chunk_prompt: str,
@@ -162,20 +163,15 @@ def process_all_md_files(
 
     print(f"索引构建完成！集合 '{collection_name}' 已保存 {len(all_documents)} 个 chunk。")
 
-
-
     return index
+
 
 if __name__ == '__main__':
 
-    md_dir = r"D:\yechuan\work\cjsx\RAG\report"
-    embed_model_path= r"D:\yechuan\work\cjsx\model\Qwen3-Embedding-0.6B"
-    api_key = "ff6acab6-c747-49d7-b01c-2bea59557b8d"
-
     index_object = process_all_md_files(
-        md_dir=md_dir,
+        md_dir=MD_DIR,
         chunk_prompt= chunk_extract_prompt_new,
-        embedding_model_path=r"D:\yechuan\work\cjsx\model\Qwen3-Embedding-0.6B",
+        embedding_model_path=EMBEDDING_MODEL_PATH,
         collection_name="financial_reports",
-        api_key="ff6acab6-c747-49d7-b01c-2bea59557b8d"
+        api_key=API_KEY
     )
