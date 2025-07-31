@@ -154,7 +154,7 @@ def query_milvus(
             query_embedding_raw = get_sentence_embedding(query_text, model, tokenizer)
             query_embedding = normalize_vector(query_embedding_raw)
 
-            search_params = {"metric_type": "IP", "params": {"nprobe": 16}}
+            search_params = {"metric_type": "IP", "params": {"M": 16, "efConstruction": 200}}
 
             search_results = collection.search(
                 data=[query_embedding],
