@@ -7,10 +7,12 @@ from llama_index.core import (
     Settings,
     Document,
 )
+from tool import timer
 from llama_index.graph_stores.neo4j import Neo4jPropertyGraphStore
 from llama_index.core.indices.property_graph import SimpleLLMPathExtractor
+from llama_index.core.indices.property_graph import SchemaLLMPathExtractor
 from llm import VolcengineLLM
-from prompt import EXTRACTOR_PROMPT_1
+from prompt import EXTRACTOR_PROMPT_1, FINANCE_ENTITIES, FINANCE_RELATIONS, FINANCE_VALIDATION_SCHEMA
 from rag_milvus.config import get_embedding_model
 from graph.config import API_KEY, NEO4J_USERNAME, NEO4J_PASSWORD, NEO4J_URI, NEO4J_DATABASE, MD_TEST_DIR
 from hybrid_chunking import custom_chunk_pipeline
@@ -18,7 +20,7 @@ from hybrid_chunking import custom_chunk_pipeline
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-
+@timer
 def setup_llm_and_embed_model():
     """配置并返回 LLM 和嵌入模型"""
     logging.info("正在配置 LLM 和嵌入模型...")
@@ -66,6 +68,7 @@ def json_parser(response_str: str) -> List[Tuple[str, str, str]]:
 
     return triples
 
+@timer
 def get_neo4j_graph_store():
     """初始化并验证 Neo4j 连接，返回 graph_store 实例"""
     logging.info(f"正在初始化 Neo4jPropertyGraphStore，数据库: {NEO4J_DATABASE}...")
@@ -91,7 +94,7 @@ def get_neo4j_graph_store():
         logging.error(f"Neo4j 连接或验证失败: {e}")
         raise
 
-
+@timer
 def load_and_chunk_documents(directory: str) -> list[Document]:
     """从指定目录加载 Markdown 文件并进行自定义分块"""
     logging.info(f"正在从 '{directory}' 加载并使用自定义逻辑分块...")
@@ -147,6 +150,7 @@ def clear_database(graph_store: Neo4jPropertyGraphStore):
         logging.error(f"清理 Neo4j 数据库时出错: {e}", exc_info=True)
 
 
+@timer
 def verify_extraction_results(graph_store: Neo4jPropertyGraphStore):
     """查询并打印数据库中提取到的实体和关系"""
     logging.info("\n--- 调试信息：检查提取到的实体和关系 ---")
@@ -177,8 +181,78 @@ def verify_extraction_results(graph_store: Neo4jPropertyGraphStore):
         logging.error(f"查询实体或关系时发生错误: {e}", exc_info=True)
 
 
-def build_property_graph():
-    """主函数，执行完整的知识图谱构建流程"""
+
+# -----------------------------------------------------------------------------------------------------------
+# Leiden算法
+@timer
+def run_leiden_community_detection(graph_store: Neo4jPropertyGraphStore):
+    """在 Neo4j 中使用 GDS 运行 Leiden 算法"""
+    logging.info("\n--- 开始运行 Leiden 社区发现算法 ---")
+
+    # GDS 内存图的名称
+    graph_name = "knowledge_graph_projection"
+
+    # 写入社区ID的节点属性名
+    write_property_name = "leidenCommunityId"
+
+    try:
+        with graph_store._driver.session(database=NEO4J_DATABASE) as session:
+            logging.info("检查 GDS 插件并清理旧的图投影...")
+            try:
+                check_gds_query = "RETURN gds.graph.exists($graph_name) AS exists"
+                result = session.run(check_gds_query, graph_name=graph_name)
+                if result.single()['exists']:
+                    session.run("CALL gds.graph.drop($graph_name)", graph_name=graph_name)
+                    logging.info(f"已删除旧的图投影 '{graph_name}'.")
+            except Exception:
+                logging.error("GDS 插件似乎未安装或配置不正确。无法继续执行社区发现。")
+                logging.error("请确保已在 Neo4j 中安装 Graph Data Science 插件。")
+                return
+
+            # 创建图的内存投影
+            # 将所有的 'entity' 节点和之间的所有关系投影到内存中
+            logging.info(f"正在创建 GDS 图投影 '{graph_name}'...")
+            project_query = """
+            CALL gds.graph.project(
+            $graph_name,
+            'entity',
+            { ALL: { type: '*', orientation: 'UNDIRECTED' } }
+            )
+            YIELD graphName, nodeCount, relationshipCount
+            """
+            result = session.run(project_query, graph_name=graph_name).data()
+            logging.info(f"图投影创建成功: {result[0]}")
+
+            # 运行 Leiden 算法并把结果写回数据库
+            logging.info("正在运行 Leiden 算法...")
+            leiden_query = """
+            CALL gds.leiden.write(
+              $graph_name,
+              {
+                minCommunitySize: 3,
+                writeProperty: $write_property
+              }
+            )
+            YIELD communityCount, nodePropertiesWritten
+            """
+            result = session.run(leiden_query, graph_name=graph_name, write_property=write_property_name).data()
+            logging.info(f"Leiden 算法执行完成: {result[0]}")
+
+            # 清理 GDS 内存中的图投影
+            logging.info(f"正在清理并删除 GDS 图投影 '{graph_name}'...")
+            session.run("CALL gds.graph.drop($graph_name)", graph_name=graph_name)
+            logging.info("GDS 资源清理完毕。")
+
+    except Exception as e:
+        logging.error(f"运行 Leiden 算法时出错: {e}", exc_info=True)
+
+
+@timer
+def build_property_graph(use_leiden: bool=False):
+    """主函数，执行完整的知识图谱构建流程
+    Args:
+        use_leiden (bool): 是否启用 Leiden 社区发现算法，默认为 False
+    """
     graph_store = None
     try:
         llm, _ = setup_llm_and_embed_model()
@@ -190,12 +264,18 @@ def build_property_graph():
         if not nodes:
             logging.info("没有可处理的文档节点，脚本执行结束。")
             return
-        kg_extractor = SimpleLLMPathExtractor(
+
+        kg_extractor = SchemaLLMPathExtractor(
             llm=llm,
-            max_paths_per_chunk=10,
+            possible_entities=FINANCE_ENTITIES,
+            possible_relations=FINANCE_RELATIONS,
+            kg_validation_schema= FINANCE_VALIDATION_SCHEMA,
+            strict=True,  # if false, will allow triplets outside of the schema
             extract_prompt=EXTRACTOR_PROMPT_1,
-            parse_fn=json_parser,
+            num_workers=4,
+            max_triplets_per_chunk=3,
         )
+
 
         logging.info("开始构建 PropertyGraphIndex...")
         index = PropertyGraphIndex(
@@ -214,7 +294,10 @@ def build_property_graph():
                 logging.error("未能将任何节点存入 Neo4j，请检查权限或配置问题。")
 
         verify_extraction_results(graph_store)
-
+        if use_leiden:
+            run_leiden_community_detection(graph_store)
+        else:
+            logging.info("Leiden 社区发现算法未启用，跳过执行。")
     except Exception as e:
         logging.error(f"构建属性图谱过程中发生严重错误: {e}", exc_info=True)
     finally:
@@ -222,9 +305,7 @@ def build_property_graph():
         if graph_store and graph_store._driver:
             graph_store._driver.close()
             logging.info("Neo4j driver closed.")
-
-
 if __name__ == "__main__":
     print("\n--- 开始运行知识图谱构建脚本 ---")
-    build_property_graph()
+    build_property_graph(use_leiden= True)
     print("\n--- 脚本执行完毕 ---")
