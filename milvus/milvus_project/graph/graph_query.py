@@ -27,7 +27,7 @@ class HybridGraphRetriever(CustomPGRetriever):
             self,
             index: PropertyGraphIndex,
             similarity_top_k: int = 4,
-            path_depth: int = 2,
+            path_depth: int = 1,
             community_expansion: bool = False,
             **kwargs,
     ):
@@ -60,24 +60,23 @@ class HybridGraphRetriever(CustomPGRetriever):
     @timer
     def _expand_with_community(self, initial_nodes: List[NodeWithScore]) -> dict:
         """
-            基于向量检索到的文本块，直接在图中查询这些文本块提及的实体，
-            再根据这些实体的社区ID，扩展到整个社区所有实体关联的文本块。
-            """
+        基于向量检索到的文本块，找到其中提及的实体，再根据这些实体的社区ID，
+        扩展到整个社区所有实体关联的文本块。
+        返回一个包含入口实体、触发的社区ID和社区节点的字典。
+        """
         if not initial_nodes:
             return {}
 
-        # 1. 从初始检索到的文本块节点中，获取它们的ID
         initial_chunk_ids = [node.node.node_id for node in initial_nodes]
 
-        # 2. 直接在图中查询这些Chunk ID提及的所有实体ID
+        # 1. 从入口Chunk中提取提及的实体ID
         mentioned_entity_ids = set()
         with self.graph_store._driver.session(database=NEO4J_DATABASE) as session:
-            # 这个查询是新的、更健壮的核心
             cypher_get_entities = """
-                UNWIND $chunk_ids AS chunk_id
-                MATCH (c:Chunk {id: chunk_id})-[:MENTIONS]->(e:entity)
-                RETURN DISTINCT e.id AS entityId
-                """
+            UNWIND $chunk_ids AS chunk_id
+            MATCH (c:Chunk {id: chunk_id})-[:MENTIONS]->(e:entity)
+            RETURN DISTINCT e.id AS entityId
+            """
             results = session.run(cypher_get_entities, chunk_ids=initial_chunk_ids)
             for record in results:
                 mentioned_entity_ids.add(record["entityId"])
@@ -85,7 +84,6 @@ class HybridGraphRetriever(CustomPGRetriever):
         if not mentioned_entity_ids:
             print("    - 初始文本块中未找到提及的实体，无法进行社区扩展。")
             return {}
-
         print(f"    - 从入口节点中提取到 {len(mentioned_entity_ids)} 个实体ID。")
 
         # 2. 查询这些实体的社区ID
@@ -104,39 +102,36 @@ class HybridGraphRetriever(CustomPGRetriever):
         if not community_ids_to_expand:
             print("    - 提及的实体均未分配社区ID，跳过扩展。")
             return {}
-
         print(f"    - 发现相关社区ID: {list(community_ids_to_expand)}。正在扩展上下文...")
 
         # 3. 获取这些社区的所有实体关联的文本块 (Chunk)
-        community_results = {}  # 创建一个字典来存储结果
+        community_nodes_map = {}
         with self.graph_store._driver.session(database=NEO4J_DATABASE) as session:
             for comm_id in community_ids_to_expand:
                 cypher_get_community_chunks = """
-                MATCH (n:entity {leidenCommunityId: $comm_id})
-                MATCH (source_node:Chunk)-[:MENTIONS]->(n)
+                MATCH (source_node:Chunk)-[:MENTIONS]->(n:entity)
+                WHERE n.leidenCommunityId = $comm_id AND NONE(id IN $initial_chunk_ids WHERE id = source_node.id)
                 RETURN DISTINCT source_node
                 """
-                results = session.run(cypher_get_community_chunks, comm_id=comm_id)
-
+                results = session.run(cypher_get_community_chunks, comm_id=comm_id, initial_chunk_ids=initial_chunk_ids)
                 community_nodes = []
                 for record in results:
-                    node_data = record["source_node"]
-                    node_properties = dict(node_data)
-                    node_id = node_properties.get("id", node_data.element_id)
-                    node_text = node_properties.get("text", "")
-
-                    # 手动创建一个 LlamaIndex 的 TextNode 对象
+                    node_data = dict(record["source_node"])
                     node_obj = TextNode(
-                        id_=node_id,
-                        text=node_text,
-                        metadata=node_properties,
+                        id_=node_data.get("id", node_data.get("element_id")),
+                        text=node_data.get("text", ""),
+                        metadata=node_data,
                     )
                     community_nodes.append(NodeWithScore(node=node_obj, score=10.0))
-
                 if community_nodes:
-                    community_results[comm_id] = community_nodes
+                    community_nodes_map[comm_id] = community_nodes
 
-        return community_results
+        # 4. 返回一个包含所有信息的字典
+        return {
+            "entry_entity_ids": mentioned_entity_ids,
+            "triggered_community_ids": community_ids_to_expand,
+            "community_nodes_map": community_nodes_map
+        }
 
     @timer
     def custom_retrieve(self, query_str: str) -> List[NodeWithScore]:
@@ -152,7 +147,7 @@ class HybridGraphRetriever(CustomPGRetriever):
         print("  - 步骤1: 执行向量检索...")
         vector_nodes = self._vector_retriever.retrieve(query_str)
         for node in vector_nodes:
-            node.node.metadata["retrieval_source"] = "Vector Search"
+            node.node.metadata["retrieval_source"] = "Vector Search (Entry)"
         print(f"  - 向量检索找到 {len(vector_nodes)} 个节点。")
 
         # Cypher检索
@@ -175,32 +170,41 @@ class HybridGraphRetriever(CustomPGRetriever):
 
         print(f"  - Cypher检索找到 {len(cypher_nodes)} 个节点。")
 
-
         # --- 社区扩展逻辑 ---
-        community_nodes_map = {}
+        all_community_nodes = []
         if self._community_expansion and vector_nodes:
             print("  - 步骤3: (已开启) 执行社区上下文扩展...")
-            # community_nodes_map 是一个字典 {comm_id: [node1, node2], ...}
-            community_nodes_map = self._expand_with_community(vector_nodes)
+            # expansion_results 是一个包含多个信息的字典
+            expansion_results = self._expand_with_community(vector_nodes)
 
-            # 为节点打上标签，并把社区ID存入元数据
-            for comm_id, nodes in community_nodes_map.items():
-                for node_with_score in nodes:
-                    node_with_score.node.metadata["retrieval_source"] = "Community Expansion"
-                    # --- 在这里，我们将确切的社区ID存入元数据 ---
-                    node_with_score.node.metadata["community_id"] = comm_id
+            if expansion_results:
+                community_nodes_map = expansion_results.get("community_nodes_map", {})
 
-            # 打印统计信息
-            total_community_nodes = sum(len(nodes) for nodes in community_nodes_map.values())
-            print(f"  - 社区扩展找到 {len(community_nodes_map)} 个社区，共 {total_community_nodes} 个额外节点。")
+                # 为节点打上标签，并把社区ID存入元数据
+                for comm_id, nodes in community_nodes_map.items():
+                    for node_with_score in nodes:
+                        node_with_score.node.metadata["retrieval_source"] = "Community Expansion"
+                        node_with_score.node.metadata["community_id"] = comm_id
+
+                # 将所有社区节点收集到一个列表中，用于后续合并
+                all_community_nodes = [node for nodes in community_nodes_map.values() for node in nodes]
+
+                if all_community_nodes:
+                    first_node_metadata = all_community_nodes[0].node.metadata
+                    first_node_metadata["expansion_entry_entities"] = list(
+                        expansion_results.get("entry_entity_ids", []))
+                    first_node_metadata["expansion_triggered_communities"] = list(
+                        expansion_results.get("triggered_community_ids", []))
+
+                # 打印统计信息
+                total_community_nodes = len(all_community_nodes)
+                print(f"  - 社区扩展找到 {len(community_nodes_map)} 个社区，共 {total_community_nodes} 个额外节点。")
 
         # ------------------------
 
         # 合并与去重
         print("  - 步骤4: 合并与去重...")
         combined_nodes = {}
-        # 社区扩展的结果优先级最高，其次是向量和Cypher
-        all_community_nodes = [node for nodes in community_nodes_map.values() for node in nodes]
         all_retrieved_nodes = all_community_nodes + vector_nodes + cypher_nodes
         for node in all_retrieved_nodes:
             if node.node.node_id not in combined_nodes:
@@ -214,7 +218,7 @@ class HybridGraphRetriever(CustomPGRetriever):
     @timer
     def print_categorized_source_nodes(self, response):
         """
-        分类别地打印源节点，展示其来源、文本内容和实体关系。
+        分类别地打印源节点，清晰地区分入口节点和社区扩展节点。
         """
         if not response.source_nodes:
             print("[上下文] 未找到源节点。")
@@ -222,187 +226,142 @@ class HybridGraphRetriever(CustomPGRetriever):
 
         print("\n" + "=" * 20 + " [上下文详细分析] " + "=" * 20)
 
-        # 按来源对节点进行分组
-        categorized_nodes = {
-            "Vector Search": [],
-            "Text-to-Cypher": [],
-            "Community Expansion": [],
-            "Unknown": [],
-        }
-        community_groups = {}
+        # --- 步骤1: 按来源对节点进行分组 ---
+        entry_nodes = []
+        cypher_nodes = []
+        community_groups = {}  # {community_id: [nodes...]}
+
         for node in response.source_nodes:
-            source = node.node.metadata.get("retrieval_source", "Unknown")
-            if source == "Community Expansion":
-                # 假设所有社区扩展出的节点都有leidenCommunityId
-                community_id = node.node.metadata.get("leidenCommunityId", "unknown_community")
-                if community_id not in community_groups:
-                    community_groups[community_id] = []
-                community_groups[community_id].append(node)
-            else:
-                categorized_nodes[source].append(node)
+            source = node.node.metadata.get("retrieval_source")
+            if source == "Vector Search (Entry)":
+                entry_nodes.append(node)
+            elif source == "Text-to-Cypher":
+                cypher_nodes.append(node)
+            elif source == "Community Expansion":
+                comm_id = node.node.metadata.get("community_id", "unknown_community")
+                if comm_id not in community_groups:
+                    community_groups[comm_id] = []
+                community_groups[comm_id].append(node)
 
-        # 将社区分组重新放回主分类，以便统一遍历
+        # --- 步骤2: 打印入口节点 (Vector Search (Entry)) ---
+        if entry_nodes:
+            print(f"\n--- 来源: Vector Search (Entry) ({len(entry_nodes)}个节点) ---")
+            # 1. 打印每个入口节点的元文本
+            for i, node in enumerate(entry_nodes):
+                print(f"\n  入口 {i + 1} (ID: {node.node.node_id}, 分数: {node.score:.4f}):")
+                print("    -> [元 Chunk 文本]:")
+                self._print_chunks_by_ids([node.node.node_id])
+
+            # 2. 基于所有入口节点，查询并打印它们触发的社区关系网络
+            print("\n  [由所有入口节点触发的社区关系网络]:")
+            try:
+                # 从入口节点中提取它们所属的社区ID
+                entry_community_ids = set()
+                with self.graph_store._driver.session(database=NEO4J_DATABASE) as session:
+                    chunk_ids = [n.node.node_id for n in entry_nodes]
+                    cypher_get_comm_ids = """
+                    UNWIND $chunk_ids AS c_id
+                    MATCH (:Chunk {id: c_id})-[:MENTIONS]->(e:entity)
+                    WHERE e.leidenCommunityId IS NOT NULL
+                    RETURN DISTINCT e.leidenCommunityId AS commId
+                    """
+                    results = session.run(cypher_get_comm_ids, chunk_ids=chunk_ids)
+                    for record in results:
+                        entry_community_ids.add(record["commId"])
+
+                if not entry_community_ids:
+                    print("    - 入口节点未关联到任何社区。")
+                else:
+                    print(f"    - 入口节点关联到社区: {list(entry_community_ids)}")
+                    with self.graph_store._driver.session(database=NEO4J_DATABASE) as session:
+                        cypher_relations = """
+                        UNWIND $comm_ids AS c_id
+                        MATCH (n:entity {leidenCommunityId: c_id})-[r]-(m:entity {leidenCommunityId: c_id})
+                        RETURN DISTINCT n.name AS source, type(r) AS relation, m.name AS target
+                        LIMIT 50
+                        """
+                        rel_results = session.run(cypher_relations, comm_ids=list(entry_community_ids))
+                        if not self._print_records(rel_results, "        - ({source})-[{relation}]->({target})"):
+                            print("        - 未在这些社区内找到关系。")
+            except Exception as e:
+                print(f"        - 查询入口社区关系时出错: {e}")
+
+        # --- 步骤3: 打印社区扩展的节点 (如果存在) ---
         if community_groups:
-            categorized_nodes["Community Expansion"] = list(community_groups.values())
+            print(f"\n--- 来源: Community Expansion (扩展节点) ({len(community_groups)}个社区) ---")
+            for i, (community_id, group) in enumerate(community_groups.items()):
+                # 过滤掉已经是入口的节点，只打印纯粹的扩展节点
+                expansion_only_nodes = [n for n in group if
+                                        n.node.node_id not in {en.node.node_id for en in entry_nodes}]
+                if not expansion_only_nodes:
+                    print(f"\n  社区 {i + 1} (ID: {community_id}): 所有节点均为入口节点，无纯扩展节点。")
+                    continue
 
-        for source, nodes_or_groups in categorized_nodes.items():
-            if not nodes_or_groups:
-                continue
+                print(f"\n  社区 {i + 1} (ID: {community_id}, 包含 {len(expansion_only_nodes)} 个纯扩展节点):")
+                print("    -> [扩展出的元 Chunk 文本]:")
+                chunk_ids = {node.node.node_id for node in expansion_only_nodes}
+                self._print_chunks_by_ids(list(chunk_ids))
 
-            print(f"\n--- 来源: {source} ({len(nodes_or_groups)}个节点/社区) ---")
-
-            # --- 新增分支：专门处理社区扩展的逻辑 ---
-            if source == "Community Expansion":
-                for i, group in enumerate(nodes_or_groups):
-
-                    community_id = group[0].node.metadata.get("community_id", "N/A")
-
-                    if community_id == "N/A":
-                        print("    -> 无法确定社区ID，跳过查询。")
-                        continue
-
-                    print(f"  社区 {i + 1} (ID: {community_id}, 包含 {len(group)} 个节点):")
-
-                    try:
-                        with self.graph_store._driver.session(database=NEO4J_DATABASE) as session:
-                            # 1. 查询并打印整个社区的关系网络
-                            print("    -> [社区关系网络]:")
-                            cypher_relations = """
-                                       MATCH (n:entity)-[r]-(m:entity)
-                                       WHERE n.leidenCommunityId = $comm_id AND m.leidenCommunityId = $comm_id
-                                       RETURN DISTINCT n.name AS source, type(r) AS relation, m.name AS target
-                                       LIMIT 50
-                                       """
-                            rel_results = session.run(cypher_relations, comm_id=community_id)
-                            found_rels = 0
-                            for record in rel_results:
-                                print(f"        - ({record['source']})-[{record['relation']}]->({record['target']})")
-                                found_rels += 1
-                            if found_rels == 0:
-                                print("        - 未找到社区内的关系。")
-
-                            # 2. 查询并打印社区所有节点对应的所有元Chunk文本
-                            print("    -> [社区元 Chunk 文本]:")
-                            chunk_ids = {node.node.node_id for node in group}
-                            cypher_chunks = """
-                                UNWIND $id_list AS chunk_id
-                                MATCH (c:Chunk {id: chunk_id})
-                                RETURN c.id, c.text AS original_text
-                                """
-                            chunk_results = session.run(cypher_chunks, id_list=list(chunk_ids))
-                            found_chunks = 0
-                            for record in chunk_results:
-                                original_text = record["original_text"].strip().replace('\n', ' ')
-                                print(f"        - [ID: {record['c.id']}] {original_text}")
-                                found_chunks += 1
-                            if found_chunks == 0:
-                                print("        - 未找到社区关联的Chunk文本。")
-
-                    except Exception as e:
-                        print(f"        - 查询社区信息时出错: {e}")
-            else:
-                for i, node in enumerate(nodes_or_groups):
-                    print(f"  源 {i + 1} (ID: {node.node.node_id}, 分数: {node.score:.4f}):")
-
-                    # 分支1: 处理 Text-to-Cypher 的虚拟节点
-                    if source == "Text-to-Cypher":
-                        cypher_content = node.text.strip()
-                        print(f"    -> [整理的实体关系内容]: {cypher_content}")
-
-                        # 步骤1: 从文本中稳健地提取出响应列表字符串
-                        response_str = ""
-                        try:
-                            response_part = cypher_content.split("Cypher Response:", 1)[1].strip()
-                            match = re.search(r'\[.*\]', response_part, re.DOTALL)
-                            if match:
-                                response_str = match.group(0)
-                            else:
-                                print("        - 未能在响应中找到有效的列表格式 `[...]`。")
-                                continue
-                        except IndexError:
-                            print("        - 未能从节点文本中解析出'Cypher Response'部分。")
-                            continue
-
-                        # 步骤2: 使用 ast.literal_eval 安全解析字符串，并提取ID
-                        unique_chunk_ids = set()
-                        try:
-                            response_data = ast.literal_eval(response_str)
-
-                            if not isinstance(response_data, list):
-                                print("        - 解析出的数据不是一个列表。")
-                                continue
-
+        # --- 步骤4: 打印 Text-to-Cypher 的结果 ---
+        if cypher_nodes:
+            print(f"\n--- 来源: Text-to-Cypher ({len(cypher_nodes)}个节点) ---")
+            for i, node in enumerate(cypher_nodes):
+                print(f"  源 {i + 1} (ID: {node.node.node_id}, 分数: {node.score:.4f}):")
+                cypher_content = node.text.strip()
+                print(f"    -> [整理的实体关系内容]: {cypher_content}")
+                # ... (您原来的Cypher解析和打印逻辑) ...
+                unique_chunk_ids = set()
+                try:
+                    response_part = cypher_content.split("Cypher Response:", 1)[1].strip()
+                    match = re.search(r'\[.*\]', response_part, re.DOTALL)
+                    if match:
+                        response_str = match.group(0)
+                        response_data = ast.literal_eval(response_str)
+                        if isinstance(response_data, list):
                             for item in response_data:
                                 if isinstance(item, dict):
-                                    # 遍历字典中的所有值，查找包含'triplet_source_id'的键
                                     for key, value in item.items():
                                         if 'triplet_source_id' in key and value:
                                             unique_chunk_ids.add(value)
-                        except (ValueError, SyntaxError) as e:
-                            # ast.literal_eval 在格式错误时会抛出这些异常
-                            print(f"        - Cypher响应内容不是有效的Python字面量格式: {e}")
-                            continue
+                except (IndexError, SyntaxError, ValueError) as e:
+                    print(f"        - 解析Cypher响应出错: {e}")
 
-                        if not unique_chunk_ids:
-                            print("        - Cypher响应中未找到任何'triplet_source_id'。")
-                            continue
+                if not unique_chunk_ids:
+                    print("    -> [元 Chunk 文本]: 未能从Cypher响应中提取到有效的源Chunk ID。")
+                    continue
 
-                        # 步骤3: 批量查询
-                        print("    -> [元 Chunk 文本 (来自Cypher响应)]: ")
-                        try:
-                            with self.graph_store._driver.session(database=NEO4J_DATABASE) as session:
-                                cypher_query = """
-                                UNWIND $id_list AS chunk_id
-                                MATCH (c:Chunk {id: chunk_id})
-                                RETURN c.id, c.text AS original_text
-                                """
-                                results = session.run(cypher_query, id_list=list(unique_chunk_ids))
+                print("    -> [元 Chunk 文本 (来自Cypher响应)]: ")
+                self._print_chunks_by_ids(list(unique_chunk_ids))
 
-                                found_texts = 0
-                                for record in results:
-                                    original_text = record["original_text"].strip().replace('\n', ' ')
-                                    print(f"        - [ID: {record['c.id']}] {original_text}")
-                                    found_texts += 1
+    # 批量打印Chunk文本
+    def _print_chunks_by_ids(self, id_list: list):
+        if not id_list:
+            return
+        try:
+            with self.graph_store._driver.session(database=NEO4J_DATABASE) as session:
+                cypher_query = """
+                UNWIND $id_list AS chunk_id_param
+                MATCH (c:Chunk {id: chunk_id_param})
+                RETURN c.id AS chunk_id, c.text AS original_text
+                """
+                results = session.run(cypher_query, id_list=id_list)
+                format_string = "        - [ID: {chunk_id}] {original_text}"
 
-                                if found_texts == 0:
-                                    print("        - 数据库中未找到任何对应ID的Chunk。")
-                        except Exception as e:
-                            print(f"        - 批量查询元文本时出错: {e}")
+                if not self._print_records(results, format_string):
+                    print("        - 数据库中未找到任何对应ID的Chunk。")
+        except Exception as e:
+            print(f"        - 批量查询元文本时出错: {e}")
 
-                    # 分支2: 处理返回真实Chunk节点的其他来源 (Community Expansion)
-                    else:
-                        for i, node in enumerate(nodes_or_groups):
-                            print(f"  源 {i + 1} (ID: {node.node.node_id}, 分数: {node.score:.4f}):")
+    # 辅助方法2: 通用打印查询结果
+    def _print_records(self, records, format_str: str) -> bool:
+        found_count = 0
+        for record in records:
+            # 使用 record.data() 将记录转换为字典，以便格式化字符串
+            print(format_str.format(**record.data()))
+            found_count += 1
+        return found_count > 0
 
-                            # 分支1: 处理 Text-to-Cypher 的虚拟节点
-                            if source == "Text-to-Cypher":
-                                # ... (您原来的Text-to-Cypher处理逻辑，完全不变) ...
-                                # ... 为了简洁，这里省略，请将您原来的代码粘贴回来 ...
-                                cypher_content = node.text.strip()
-                                print(f"    -> [整理的实体关系内容]: {cypher_content}")
-                            # 分支2: 处理返回真实Chunk节点的来源 (Vector Search)
-                            else:
-                                retriever_content = node.text.strip().replace('\n', ' ')
-                                print(f"    -> [整理的实体关系内容]: {retriever_content}")
-                                print("    -> [元 Chunk 文本]:")
 
-                                cypher_query = """
-                                                MATCH (c:Chunk {id: $chunk_id})
-                                                RETURN c.text AS original_text
-                                                """
-                                try:
-                                    with self.graph_store._driver.session(
-                                            database=NEO4J_DATABASE) as session:
-                                        record = session.run(cypher_query, chunk_id=node.node.node_id).single()
-
-                                        if record and record["original_text"]:
-                                            original_text = record["original_text"].strip().replace('\n', ' ')
-                                            print(f"        - {original_text}")
-                                        else:
-                                            print("        - 未能在数据库中找到对应的元文本。")
-                                except Exception as e:
-
-                                    print(f"        - 查询元文本时出错: {e}")
 @timer
 def load_existing_graph_index():
     """从现有的 Neo4j 数据库中加载 PropertyGraphIndex。"""
@@ -440,9 +399,9 @@ def run_queries(index: PropertyGraphIndex):
     # --- 1. 自定义混合检索查询引擎 ---
     print("\n 正在构建自定义混合检索查询引擎...")
     hybrid_retriever = HybridGraphRetriever(
-        graph_store=index.property_graph_store,
+        graph_store= index.property_graph_store,
         index=index,
-        similarity_top_k=5,
+        similarity_top_k=2,
         community_expansion = True,
     )
     custom_query_engine = RetrieverQueryEngine.from_args(
