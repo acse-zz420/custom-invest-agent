@@ -12,7 +12,7 @@ from llama_index.graph_stores.neo4j import Neo4jPropertyGraphStore
 from llama_index.core.indices.property_graph import SimpleLLMPathExtractor
 from llama_index.core.indices.property_graph import SchemaLLMPathExtractor
 from llm import VolcengineLLM
-from prompt import EXTRACTOR_PROMPT_1, FINANCE_ENTITIES, FINANCE_RELATIONS, FINANCE_VALIDATION_SCHEMA
+from prompt import EXTRACTOR_PROMPT_1, FINANCE_ENTITIES, FINANCE_RELATIONS
 from rag_milvus.config import get_embedding_model
 from graph.config import API_KEY, NEO4J_USERNAME, NEO4J_PASSWORD, NEO4J_URI, NEO4J_DATABASE, MD_TEST_DIR
 from hybrid_chunking import custom_chunk_pipeline

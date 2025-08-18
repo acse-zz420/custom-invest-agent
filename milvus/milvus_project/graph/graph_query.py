@@ -74,7 +74,7 @@ class HybridGraphRetriever(CustomPGRetriever):
         with self.graph_store._driver.session(database=NEO4J_DATABASE) as session:
             cypher_get_entities = """
             UNWIND $chunk_ids AS chunk_id
-            MATCH (c:Chunk {id: chunk_id})-[:MENTIONS]->(e:entity)
+            MATCH (c:Chunk {id: chunk_id})-[:MENTIONS]->(e:__Entity__)
             RETURN DISTINCT e.id AS entityId
             """
             results = session.run(cypher_get_entities, chunk_ids=initial_chunk_ids)
@@ -91,7 +91,7 @@ class HybridGraphRetriever(CustomPGRetriever):
         with self.graph_store._driver.session(database=NEO4J_DATABASE) as session:
             cypher_get_ids = """
             UNWIND $entity_ids AS entity_id
-            MATCH (n:entity {id: entity_id})
+            MATCH (n:__Entity__ {id: entity_id})
             WHERE n.leidenCommunityId IS NOT NULL
             RETURN DISTINCT n.leidenCommunityId AS communityId
             """
@@ -109,7 +109,7 @@ class HybridGraphRetriever(CustomPGRetriever):
         with self.graph_store._driver.session(database=NEO4J_DATABASE) as session:
             for comm_id in community_ids_to_expand:
                 cypher_get_community_chunks = """
-                MATCH (source_node:Chunk)-[:MENTIONS]->(n:entity)
+                MATCH (source_node:Chunk)-[:MENTIONS]->(n:__Entity__)
                 WHERE n.leidenCommunityId = $comm_id AND NONE(id IN $initial_chunk_ids WHERE id = source_node.id)
                 RETURN DISTINCT source_node
                 """
@@ -261,7 +261,7 @@ class HybridGraphRetriever(CustomPGRetriever):
                     chunk_ids = [n.node.node_id for n in entry_nodes]
                     cypher_get_comm_ids = """
                     UNWIND $chunk_ids AS c_id
-                    MATCH (:Chunk {id: c_id})-[:MENTIONS]->(e:entity)
+                    MATCH (:Chunk {id: c_id})-[:MENTIONS]->(e:__Entity__)
                     WHERE e.leidenCommunityId IS NOT NULL
                     RETURN DISTINCT e.leidenCommunityId AS commId
                     """
@@ -276,7 +276,7 @@ class HybridGraphRetriever(CustomPGRetriever):
                     with self.graph_store._driver.session(database=NEO4J_DATABASE) as session:
                         cypher_relations = """
                         UNWIND $comm_ids AS c_id
-                        MATCH (n:entity {leidenCommunityId: c_id})-[r]-(m:entity {leidenCommunityId: c_id})
+                        MATCH (n:__Entity__ {leidenCommunityId: c_id})-[r]-(m:__Entity__ {leidenCommunityId: c_id})
                         RETURN DISTINCT n.name AS source, type(r) AS relation, m.name AS target
                         LIMIT 50
                         """
