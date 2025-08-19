@@ -210,10 +210,41 @@ class HybridGraphRetriever(CustomPGRetriever):
             if node.node.node_id not in combined_nodes:
                 combined_nodes[node.node.node_id] = node
 
-        final_nodes = list(combined_nodes.values())
-        print(f"--- 混合检索完成，合并去重后共 {len(final_nodes)} 个节点。 ---\n")
+        final_nodes_raw = list(combined_nodes.values())
+        final_nodes_purified = []
+        for node_with_score in final_nodes_raw:
+            original_node = node_with_score.node
 
-        return final_nodes
+            # 1. 明确地只提取文本内容
+            text_content = original_node.get_content(metadata_mode="none")
+
+            # 2. 检查文本内容有效性
+            if not isinstance(text_content, str) or not text_content.strip():
+                print(f"  - [过滤] 丢弃了一个文本内容为空或无效的节点: ID={original_node.node_id}")
+                continue
+
+            # 3. 移除 'embedding' 键
+            clean_metadata = original_node.metadata.copy()  # 创建副本以避免修改原始对象
+            if 'embedding' in clean_metadata:
+                del clean_metadata['embedding']
+                print(f"  - [净化] 从节点 {original_node.node_id} 的元数据中移除了 embedding。")
+
+            # 4. 创建一个全新的纯净的 TextNode 对象
+            purified_node = TextNode(
+                id_=original_node.node_id,
+                text=text_content,
+                metadata=clean_metadata,
+            )
+
+            # 5. 用纯净的节点和原始分数重新组装 NodeWithScore
+            final_nodes_purified.append(NodeWithScore(
+                node=purified_node,
+                score=node_with_score.score
+            ))
+
+        print(f"--- 净化完成，节点数从 {len(final_nodes_raw)} 变为 {len(final_nodes_purified)} ---\n")
+
+        return final_nodes_purified
 
     @timer
     def print_categorized_source_nodes(self, response):
@@ -389,6 +420,7 @@ def run_queries(index: PropertyGraphIndex):
     if not index:
         print("索引对象无效，无法查询。")
         return
+
 
     # --- 查询模式: 自定义混合检索 vs. 基础向量检索 ---
     print("\n" + "=" * 60)
