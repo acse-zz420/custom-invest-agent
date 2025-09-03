@@ -1,17 +1,12 @@
-import asyncio
+from rag_milvus import tracing
 import json
-from typing import Dict, List
-from llama_index.core.tools import FunctionTool
-from llama_index.core.llms import ChatMessage
 import re
-import xml.etree.ElementTree as ET
-from pydantic import BaseModel, Field
-from typing import Any, Optional, Dict
+
 
 from llama_index.core.llms import ChatMessage, LLM
 from llama_index.core.workflow import (
     Event, StartEvent, StopEvent, step,
-    Workflow
+    Workflow, Context
 )
 from llama_index.core.agent.workflow import AgentWorkflow
 from pyexpat.errors import messages
@@ -19,93 +14,13 @@ from pyexpat.errors import messages
 from tools.calculator import *
 from tools.rag_tools import *
 from llama_index.core.llms import ChatMessage
-from llama_index.core.agent.workflow import FunctionAgent
-from tool_call_llm import DoubaoToolLLM
+
+from agent_prompts import *
+from events import *
 from llama_index.utils.workflow import draw_all_possible_flows
 
-
-
-# --- 1. 定义工作流中的数据结构 (Events and Plan) ---
-
-class UserInputEvent(StartEvent):
-    user_msg: str
-    chat_history: List[Dict[str, Any]] = Field(default_factory=list)
-
-class FinalOutputEvent(StopEvent):
-    response: str
-
-class CalculationEvent(Event):
-    user_msg: str
-    calculation_details: str
-
-class DocumentSearchEvent(Event):
-    user_msg: str
-    query: str
-
-class GraphQueryEvent(Event):
-    user_msg: str
-    query: str
-
-class SimpleChatEvent(Event):
-    user_msg: str
-
-# --- 汇总事件 ---
-class SummaryRequestEvent(Event):
-    user_msg: str
-    tool_result: str
-
-# --- 2. 定义规划者的 Prompt ---
-
-DISPATCHER_PROMPT = """你是一个任务分发机器人。你的任务是分析用户的请求，并结合“聊天历史”的上下文，并判断它属于哪一类任务。
-
-**聊天历史**
-{chat_history}
-
-## 任务类别及详细说明 ##
-
-1.  **"calculation" (计算任务)**
-    *   **何时使用:** 当用户的请求是一个明确的、可以代入公式进行计算的数学问题时。
-    *   **关键词:** “计算”、“收益率”、“波动率是多少”、“百分比”、“增长了多少”。
-    *   **示例:** "股价从100涨到105，收益率是多少？" 
-    *   **反例:** "A公司的收入增长率是多少？" -> 这不是计算任务，因为需要先查找数据，所以应归类为 "document_search"。
-
-2.  **"document_search" (文档检索任务)**
-    *   **何时使用:** 当用户的问题需要通过**阅读和理解**文档、报告、新闻等非结构化文本来寻找**事实、摘要、原因、影响、观点或解释**时。这是最常用的类别。
-    *   **关键词:** “是什么”、“为什么”、“分析”、“总结”、“介绍一下”、“有哪些”、“的原因”、“的影响”。
-    *   **示例:** "分析一下美债对中国进出口的影响" 
-
-3.  **"graph_query" (图谱查询任务)**
-    *   **何时使用:** 当用户的问题是关于**两个或多个特定实体之间**的、**非常明确的、已知的结构化关系**时,具有主谓宾的结构。
-    *   **关键词:** “和...的关系”、“半导体市场销量是...”、“哪些公司投资了...”、“...的股东是谁”。
-    *   **示例:** "胜利证券和OSL数字证券是什么关系？"
-
-4.  **"simple_chat" (简单聊天)**
-    *   **何时使用:** 当用户的请求是简单的问候、闲聊，或者是一个不属于以上任何类别的常识性问题。
-    *   **示例:** "你好"
-
-对于非计算的问题，优先使用"document_search"
-请根据用户的请求和聊天历史，只返回一个包含 `task_type` 和 `query` 的、严格的 JSON 对象。`query` 应该是传递给下一步专家的、精炼后的指令。
-
-
-
-例如：
-用户请求: "A公司股票A的2025-8-25收盘价为56.7，在2025-8-26收盘价为58.4，请问他的收益率是多少？"
-你的输出:
-```json
-{{
-  "task_type": "calculation",
-  "query": "使用起始价格56.7和结束价格58.4，调用calculate_return_rate工具计算收益率"
-}}
-
-## 当前用户请求 ##
-{user_msg}
-"""
-
-
-# --- 3. 创建自定义工作流 ---
-
 class FinancialWorkflow(Workflow):
-    def __init__(self, llm: LLM, agents: Dict[str, AgentWorkflow], verbose: bool = False):
+    def __init__(self, llm: LLM, agents: Dict[str, AgentWorkflow], verbose: bool = False, max_loops:int=3):
         super().__init__(
             timeout=300.0,
             verbose=verbose,
@@ -114,7 +29,7 @@ class FinancialWorkflow(Workflow):
         self.llm = llm
         self.agents = agents
         self.verbose = verbose
-
+        self.max_loops = max_loops
         self.tools = {
             "Calculator": [
                 return_rate_tool,
@@ -123,77 +38,22 @@ class FinancialWorkflow(Workflow):
             "DocumentSearch": [custom_vector_rag_tool],
             "KnowledgeGraph": [custom_graph_rag_tool],
         }
-    # 步骤 1: 规划 (Plan)
-    @step
-    async def dispatcher_step(
-            self, ev: UserInputEvent
-    ) -> CalculationEvent | DocumentSearchEvent | GraphQueryEvent | SimpleChatEvent:
-        if self.verbose: print(f"--- [Dispatcher]: 正在分析请求 '{ev.user_msg}'... ---")
 
-        formatted_history_parts = []
-        for msg in ev.chat_history:
-            # 获取 role
-            role = msg.get("role", "unknown").capitalize()
+    def _extract_json_from_response(self, response_content: str) -> str:
+        """
+        一个健壮的辅助函数，使用正则表达式从 LLM 的响应中提取出 JSON 字符串。
+        """
+        # 正则表达式：匹配从第一个 '{' 到最后一个 '}' 之间的所有内容
+        # re.DOTALL 标志让 '.' 可以匹配包括换行符在内的任何字符
+        json_match = re.search(r'\{.*\}', response_content, re.DOTALL)
 
-            # 从 blocks 列表中提取文本内容
-            content_text = ""
-            blocks = msg.get("blocks", [])
-            if blocks and isinstance(blocks, list):
-
-                text_blocks = [b.get("text") for b in blocks if b.get("block_type") == "text" and b.get("text")]
-                content_text = "\n".join(text_blocks)
-
-            if content_text:
-                formatted_history_parts.append(f"{role}: {content_text}")
-
-        formatted_history = "\n".join(formatted_history_parts)
-        if not formatted_history:
-            formatted_history = "无历史记录。"
-
-        prompt = DISPATCHER_PROMPT.format( chat_history=formatted_history, user_msg=ev.user_msg)
-
-        response = await self.llm.achat(
-            messages=[ChatMessage(role="user", content=prompt)],
-        )
-
-        try:
-
-            # 1. 首先，获取原始 content
-            raw_content = response.message.content
-            if self.verbose: print(
-                f"---  [Dispatcher Step 1]: LLM 返回的原始 content 类型: {type(raw_content)}, 内容: '{raw_content}' ---")
-
-            # 2. 检查 content 是否为 None 或空
-            if not raw_content or not raw_content.strip():
-                raise ValueError("LLM returned empty content.")
-
-            # 3. 执行清理操作
-            cleaned_response = raw_content.strip().replace("```json", "").replace("```", "")
-
-            final_json_str = cleaned_response.strip()
-            if self.verbose: print(f"---  [Dispatcher Step 3]: 最终准备解析的字符串: '{final_json_str}' ---")
-
-            decision = json.loads(final_json_str)
-            task_type = decision.get("task_type")
-            query = decision.get("query")
-
-            if self.verbose: print(f"--- [Dispatcher]: 决策完成，任务类型 = {task_type} ---")
-
-            if task_type == "calculation":
-                return CalculationEvent(user_msg=ev.user_msg, calculation_details=query)
-            elif task_type == "document_search":
-                return DocumentSearchEvent(user_msg=ev.user_msg, query=query)
-            elif task_type == "graph_query":
-                return GraphQueryEvent(user_msg=ev.user_msg, query=query)
-            else:
-                return SimpleChatEvent(user_msg=ev.user_msg)
-        except Exception as e:
-            error_context = "cleaned_response 未定义"
-            if 'cleaned_response' in locals():
-                error_context = f"cleaned_response 的值为: '{cleaned_response}'"
-
-            if self.verbose: print(f"--- ❌ [Dispatcher]: 决策解析失败 ({e})，上下文: {error_context}，转为简单聊天。 ---")
-            return SimpleChatEvent(user_msg=ev.user_msg)
+        if json_match:
+            json_str = json_match.group(0)
+            if self.verbose: print(f"--- [JSON Extractor]: 成功提取到 JSON: '{json_str}' ---")
+            return json_str
+        else:
+            if self.verbose: print(f"--- [JSON Extractor]: 未在响应中找到有效的 JSON 对象。 ---")
+            raise ValueError("No valid JSON object found in LLM response.")
 
     async def _execute_tool_calling_step(self, tool_category: str, user_input: str) -> str:
         """一个通用的、执行 Tool Calling 的辅助函数"""
@@ -247,45 +107,147 @@ class FinancialWorkflow(Workflow):
 
         final_result = "\n".join([f"{r['tool_name']} 返回: {r['output']}" for r in tool_outputs])
         return final_result
-
-    # 步骤 2a: 计算分支
-
+    # 步骤 1: 规划 (Plan)
     @step
-    async def calculation_step(self, ev: CalculationEvent) -> SummaryRequestEvent:
-        result = await self._execute_tool_calling_step("Calculator", ev.calculation_details)
-        return SummaryRequestEvent(user_msg=ev.user_msg, tool_result=result)
-
-    # 步骤 2b: 文档检索分支
-    @step
-    async def doc_search_step(self, ev: DocumentSearchEvent) -> SummaryRequestEvent:
-        result = await self._execute_tool_calling_step("DocumentSearch", ev.query)
-        return SummaryRequestEvent(user_msg=ev.user_msg, tool_result=result)
-
-    # 步骤 2c: 图谱查询分支
-    @step
-    async def graph_query_step(self, ev: GraphQueryEvent) -> SummaryRequestEvent:
-        result = await self._execute_tool_calling_step("KnowledgeGraph", ev.query)
-        return SummaryRequestEvent(user_msg=ev.user_msg, tool_result=result)
-
-    # 步骤 2d: 简单聊天分支
-    @step
-    async def simple_chat_step(self, ev: SimpleChatEvent) -> FinalOutputEvent:
-        if self.verbose: print(f"--- 💬 [Chat]: 正在直接回答... ---")
-        messages_to_send = [ChatMessage(role="user", content=ev.user_msg)]
-        response = await self.llm.achat(messages_to_send)
-        return FinalOutputEvent(response=response.message.content)
-
-    # 步骤 3: 总结器 (Summarizer) - 接收所有专家分支的结果
-    @step
-    async def summarizer_step(self, ev: SummaryRequestEvent) -> FinalOutputEvent:
-        if self.verbose: print(f"--- [Summarizer]: 正在总结专家结果... ---")
-        prompt = (
-            f"你是一个总结专家。请根据用户的“原始请求”和下面专家的“工作报告”，生成一个最终的、流畅连贯的中文回答。\n\n"
-            f"## 用户的原始请求 ##\n{ev.user_msg}\n\n"
-            f"## 专家工作报告 ##\n{ev.tool_result}\n\n"
-            f"## 最终回答 ##"
-        )
+    async def dispatcher_step(self, ev: UserInputEvent) -> RAGTriggerEvent | SimpleChatTriggerEvent:
+        if self.verbose: print(f"--- [Dispatcher]: 分析请求 '{ev.user_msg}'... ---")
+        prompt = DISPATCHER_PROMPT.format(user_msg=ev.user_msg, chat_history=str(ev.chat_history))
         response = await self.llm.achat([ChatMessage(role="user", content=prompt)])
+        try:
+            raw_content = response.message.content or ""
+            if self.verbose: print(f"--- [Dispatcher]: LLM 返回的原始决策文本: '{raw_content}' ---")
+
+            cleaned_response = self._extract_json_from_response(raw_content)
+            decision = json.loads(cleaned_response)
+
+            if decision.get("task_type") == "retrieval":
+
+                return RAGTriggerEvent(user_msg=ev.user_msg, query=ev.user_msg)
+            else:
+                return SimpleChatTriggerEvent(user_msg=ev.user_msg)
+        except Exception as e:
+            if self.verbose: print(f"--- [Dispatcher]: 决策解析失败 ({e})，转为简单聊天。 ---")
+            return SimpleChatTriggerEvent(user_msg=ev.user_msg)
+
+    # --- 路线 A: 简单聊天 ---
+    @step
+    async def simple_chat_step(self, ev: SimpleChatTriggerEvent) -> FinalOutputEvent:
+        if self.verbose: print(f"--- [SimpleChat]: 直接回答... ---")
+        response = await self.llm.achat([ChatMessage(role="user", content=ev.user_msg)])
         return FinalOutputEvent(response=response.message.content)
 
-# draw_all_possible_flows(FinancialWorkflow, filename="multi_step_workflow.html")
+    # --- 路线 B: RAG 流程 ---
+
+    # 步骤 B.1: 并行检索 (Fan-Out)
+    @step
+    async def milvus_retrieval_step(self, ev: RAGTriggerEvent) -> SearchResultEvent:
+        if self.verbose: print(f"--- [Milvus]: (循环 {ev.current_loop}) 开始并行检索... ---")
+        nodes = await custom_milvus_search(ev.query)
+        return SearchResultEvent(source="milvus", results=nodes, user_msg=ev.user_msg, query=ev.query,
+                                 current_loop=ev.current_loop)
+
+    @step
+    async def graph_retrieval_step(self, ev: RAGTriggerEvent) -> SearchResultEvent:
+        if self.verbose: print(f"--- [Graph]: (循环 {ev.current_loop}) 开始并行查询... ---")
+        nodes = await asyncio.to_thread(custom_graph_search, ev.query)
+        return SearchResultEvent(source="graph", results=nodes, user_msg=ev.user_msg, query=ev.query,
+                                 current_loop=ev.current_loop)
+
+
+    @step
+    async def aggregator_step(self, ev: SearchResultEvent, ctx: Context) -> AggregatedContextEvent| None:
+
+        search_results: List[SearchResultEvent] | None = ctx.collect_events(
+            ev, expected=[SearchResultEvent, SearchResultEvent]
+        )
+        if search_results is None:
+            # 如果还没有收集齐（比如只有一个分支完成了），
+            # 就返回 None，工作流会暂停此步骤并等待下一个事件
+            if self.verbose: print(f"--- [Aggregator]: 已收到来自 '{ev.source}' 的结果，等待其他并行结果... ---")
+            return None
+        if self.verbose: print(f"--- [Aggregator]: 开始融合去重... ---")
+
+        all_nodes = []
+        for result_event in search_results:
+            all_nodes.extend(result_event.results)
+
+        # (去重逻辑)
+        unique_nodes = {(n.node.metadata.get("file_name"), n.node.get_content()): n for n in all_nodes}
+        final_nodes = list(unique_nodes.values())
+
+        fused_context = "\n\n".join(
+            [f"来源: {n.node.metadata.get('file_name', 'N/A')}\n内容: {n.node.get_content()}" for n in final_nodes])
+        ref_event = search_results[0]
+
+        return AggregatedContextEvent(
+            user_msg=ref_event.user_msg, query=ref_event.query, current_loop=ref_event.current_loop,
+            retrieved_nodes=final_nodes, fused_context=fused_context
+        )
+
+    # 步骤 B.3: 判断是否需要计算
+    @step
+    async def calculation_check_step(self, ev: AggregatedContextEvent) -> CalculationEvent | SummarizationEvent:
+        if self.verbose: print(f"--- [CalcCheck]: 检查是否需要计算... ---")
+        prompt = CALCULATION_CHECK_PROMPT.format(user_msg=ev.user_msg, context=ev.fused_context)
+        response = await self.llm.achat([ChatMessage(role="user", content=prompt)])
+        raw_content = response.message.content or ""
+        if self.verbose: print(f"--- [Dispatcher]: LLM 返回的原始决策文本: '{raw_content}' ---")
+
+        cleaned_response = self._extract_json_from_response(raw_content)
+        decision = json.loads(cleaned_response)
+
+        if decision.get("calculation_needed"):
+            if self.verbose: print(f"--- [CalcCheck]: 需要计算。进入计算步骤... ---")
+            # 将所有状态传递给计算事件
+            return CalculationEvent(user_msg=ev.user_msg, calculation_details=decision.get("calculation_query"),
+                                    fused_context=ev.fused_context,current_loop=ev.current_loop)
+        else:
+            if self.verbose: print(f"--- [CalcCheck]: 无需计算。直接进入总结步骤... ---")
+            # 如果不需要计算，就直接用融合的上下文去生成答案
+            return SummarizationEvent(user_msg=ev.user_msg, final_context=ev.fused_context,current_loop=ev.current_loop)
+
+    # 步骤 B.4: 计算 (可选路径)
+    @step
+    async def calculation_step(self, ev: CalculationEvent) -> SummarizationEvent:
+        if self.verbose: print(f"--- [Calculator]: 执行计算... ---")
+        # (你需要一个 _execute_tool_calling_step 辅助函数)
+        calc_result = await self._execute_tool_calling_step("Calculator", ev.calculation_details)
+
+        final_context = f"检索到的信息:\n{ev.fused_context}\n\n计算结果:\n{calc_result}"
+        return SummarizationEvent(user_msg=ev.user_msg, final_context=final_context, current_loop=ev.current_loop)
+
+    # 步骤 B.5: 生成最终答案
+    @step
+    async def summarizer_step(self, ev: SummarizationEvent) -> CritiqueEvent:
+        if self.verbose: print(f"---  [Summarizer]: 生成草稿回答... ---")
+        prompt = SUMMARIZER_PROMPT.format(context=ev.final_context, user_msg=ev.user_msg)
+        response = await self.llm.achat([ChatMessage(role="user", content=prompt)])
+        draft_answer = response.message.content
+        return CritiqueEvent(user_msg=ev.user_msg, final_context=ev.final_context, preliminary_answer=draft_answer,
+                             current_loop=ev.current_loop)
+
+    # 步骤 B.6: 质量评估与循环
+    @step
+    async def quality_check_step(self, ev: CritiqueEvent) -> RAGTriggerEvent | FinalOutputEvent:
+        if self.verbose: print(f"--- [Critique]: 评估草稿回答... ---")
+        prompt = CRITIQUE_PROMPT.format(user_msg=ev.user_msg, draft_answer=ev.preliminary_answer)
+        response = await self.llm.achat([ChatMessage(role="user", content=prompt)])
+        raw_content = response.message.content or ""
+        if self.verbose: print(f"--- [Dispatcher]: LLM 返回的原始决策文本: '{raw_content}' ---")
+
+        cleaned_response = self._extract_json_from_response(raw_content)
+        critique = json.loads(cleaned_response)
+
+        current_loop = ev.current_loop if hasattr(ev, 'current_loop') else 1
+
+        if critique.get("is_sufficient") or current_loop >= self.max_loops:
+            if not critique.get("is_sufficient"):
+                print(f"---  [Critique]: 已达到最大循环次数 ({self.max_loops})，强制结束。---")
+            if self.verbose: print(f"--- [Critique]: 回答令人满意。工作流结束。 ---")
+            return FinalOutputEvent(response=ev.preliminary_answer)
+        else:
+            if self.verbose: print(f"--- [Critique]: 回答不理想。将基于修正建议重新开始检索... ---")
+            new_query = f"原始问题: {ev.user_msg}\n修正建议: {critique.get('missing_information')}"
+            return RAGTriggerEvent(user_msg=ev.user_msg, query=new_query, current_loop=current_loop + 1)
+
+draw_all_possible_flows(FinancialWorkflow, filename="multi_step_workflow.html")

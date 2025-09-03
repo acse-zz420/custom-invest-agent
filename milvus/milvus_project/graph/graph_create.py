@@ -12,7 +12,7 @@ from llama_index.graph_stores.neo4j import Neo4jPropertyGraphStore
 from llama_index.core.indices.property_graph import SimpleLLMPathExtractor
 from llama_index.core.indices.property_graph import SchemaLLMPathExtractor
 from llm import VolcengineLLM
-from prompt import EXTRACTOR_PROMPT_1, FINANCE_ENTITIES, FINANCE_RELATIONS
+from prompt import EXTRACTOR_PROMPT, FINANCE_ENTITIES, FINANCE_RELATIONS
 from rag_milvus.config import get_embedding_model
 from graph.config import API_KEY, NEO4J_USERNAME, NEO4J_PASSWORD, NEO4J_URI, NEO4J_DATABASE, MD_TEST_DIR
 from hybrid_chunking import custom_chunk_pipeline
@@ -269,11 +269,10 @@ def build_property_graph(use_leiden: bool=False):
             llm=llm,
             possible_entities=FINANCE_ENTITIES,
             possible_relations=FINANCE_RELATIONS,
-            kg_validation_schema= FINANCE_VALIDATION_SCHEMA,
-            strict=True,  # if false, will allow triplets outside of the schema
-            extract_prompt=EXTRACTOR_PROMPT_1,
+            strict= False,  # if false, will allow triplets outside of the schema
+            extract_prompt=EXTRACTOR_PROMPT,
             num_workers=4,
-            max_triplets_per_chunk=3,
+            max_triplets_per_chunk=5,
         )
 
 
@@ -281,7 +280,7 @@ def build_property_graph(use_leiden: bool=False):
         index = PropertyGraphIndex(
             nodes=nodes,
             property_graph_store=graph_store,
-            kg_extractor= kg_extractor,
+            kg_extractors= [kg_extractor],
             show_progress=True,
         )
 

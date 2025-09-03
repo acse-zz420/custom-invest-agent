@@ -228,7 +228,7 @@ def get_all_nodes_from_milvus(collection_name: str, host: str, port: str) -> Lis
 
 
 @timer
-def run_hybrid_search(
+def bm25_enhanced_search(
         collection_name: str,
         query_text: str,
         dense_embedding_function: object,  # 密集向量编码器实例
@@ -409,10 +409,10 @@ if __name__ == "__main__":
     #示例 : 混合搜索(BM25)
     print("\n--- 示例 4: 混合搜索(BM25)")
 
-    results4 = run_hybrid_search(
+    results4 = bm25_enhanced_search(
         collection_name=COLLECTION,
         query_text="针对房地产政策，有哪些可以完善的地方",
-        dense_embedding_function=get_sentence_embedding,
+        dense_embedding_function=get_sentence_embedding
         embedding_model_path=EMBEDDING_MODEL_PATH,
         filters=complex_filters,
         top_k=5

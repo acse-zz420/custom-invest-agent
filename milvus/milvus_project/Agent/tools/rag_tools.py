@@ -1,4 +1,5 @@
 import asyncio
+from typing import List
 from llama_index.core import PropertyGraphIndex
 from llama_index.graph_stores.neo4j import Neo4jPropertyGraphStore
 from llama_index.core.response_synthesizers import get_response_synthesizer, ResponseMode
@@ -7,13 +8,14 @@ from llama_index.core.settings import Settings
 from llama_index.core.tools import FunctionTool
 
 from graph.graph_query import HybridGraphRetriever
-from rag_milvus.run import execute_rag_pipeline,get_sentence_embedding,get_reranker_model
+from rag_milvus.rag_pipline import execute_rag_pipeline,get_sentence_embedding,get_reranker_model,retrieve_and_rerank_pipeline
 from prompt import CUSTOM_QA_TEMPLATE, CUSTOM_REFINE_TEMPLATE
 from llm import VolcengineLLM
 from Agent.config import *
+from llama_index.core.schema import NodeWithScore, TextNode
 
 llm = VolcengineLLM(api_key=API_KEY)
-def custom_graph_search(query: str) -> str:
+def custom_graph_search(query: str) -> List[NodeWithScore]:
     """
     使用混合图谱检索策略（向量+社区扩展）来回答关于实体关系的问题。
     适用于需要深度图谱遍历和关联分析的复杂查询。
@@ -37,26 +39,15 @@ def custom_graph_search(query: str) -> str:
         community_expansion=True,
     )
 
-    # c. 构建响应合成器
-    synthesizer = get_response_synthesizer(
-        llm=llm,
-        response_mode=ResponseMode.COMPACT,
-        text_qa_template=CUSTOM_QA_TEMPLATE,
-        refine_template=CUSTOM_REFINE_TEMPLATE
-    )
+    retrieved_nodes = hybrid_retriever.retrieve(query)
 
-    # d. 构建最终的查询引擎
-    custom_query_engine = RetrieverQueryEngine(
-        retriever=hybrid_retriever,
-        response_synthesizer=synthesizer
-    )
+    print(f"[图谱检索工具] 检索到 {len(retrieved_nodes)} 个节点。")
 
-    # e. 执行查询并返回结果
-    response = custom_query_engine.query(query)
-    return str(response)
+    # d. 直接返回结构化的节点列表
+    return retrieved_nodes
 
 
-async def custom_milvus_search(query: str) -> str:
+async def custom_milvus_search(query: str) -> List[NodeWithScore]:
     """
     使用BM25增强的混合搜索策略，从Milvus向量数据库的金融文档中检索信息。
     适用于需要从大量非结构化文本中寻找答案的问题。
@@ -67,11 +58,10 @@ async def custom_milvus_search(query: str) -> str:
         "institution",
         "report_type",
         "authors",
-        "date_range"
+        # "date_range"
     ]
 
-    response = await asyncio.to_thread(
-        execute_rag_pipeline,
+    retrieved_nodes = await retrieve_and_rerank_pipeline(
         query=query,
         llm=llm,
         collection_name="financial_reports",
@@ -79,13 +69,16 @@ async def custom_milvus_search(query: str) -> str:
         search_strategy="bm25_enhanced",
         search_threshold=0.4,
         filter_fields=filter_fields,
-        top_k_retrieval=50,
-        top_k_llm=5,
+        top_k_retrieval=10,
+        top_k_rerank=3,
         dense_embedding_function=get_sentence_embedding,
         reranker_model_function=get_reranker_model()
     )
 
-    return str(response)
+    print(f"[Milvus检索工具] 检索并重排后，返回 {len(retrieved_nodes)} 个节点。")
+
+    # 直接返回结构化的节点列表
+    return retrieved_nodes
 
 custom_graph_rag_tool = FunctionTool.from_defaults(
     fn=custom_graph_search, # 同步函数
