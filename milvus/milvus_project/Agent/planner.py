@@ -150,7 +150,7 @@ class FinancialWorkflow(Workflow):
     async def graph_retrieval_step(self, ev: RAGTriggerEvent) -> SearchResultEvent:
         if self.verbose: print(f"--- [Graph]: (循环 {ev.current_loop}) 开始并行查询... ---")
         nodes = await asyncio.to_thread(custom_graph_search, ev.query)
-        return SearchResultEvent(source="graph", results=nodes, user_msg=ev.user_msg, query=ev.query,
+        return SearchResultEvent(source="rag_graph", results=nodes, user_msg=ev.user_msg, query=ev.query,
                                  current_loop=ev.current_loop)
 
 
@@ -249,5 +249,6 @@ class FinancialWorkflow(Workflow):
             if self.verbose: print(f"--- [Critique]: 回答不理想。将基于修正建议重新开始检索... ---")
             new_query = f"原始问题: {ev.user_msg}\n修正建议: {critique.get('missing_information')}"
             return RAGTriggerEvent(user_msg=ev.user_msg, query=new_query, current_loop=current_loop + 1)
+
 
 draw_all_possible_flows(FinancialWorkflow, filename="multi_step_workflow.html")

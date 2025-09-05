@@ -17,6 +17,8 @@ from config import *
 from tool import timer
 from prompt import CYPHER_PROMPT
 
+from IPython.display import display, Markdown
+
 
 class HybridGraphRetriever(CustomPGRetriever):
     """
@@ -54,7 +56,7 @@ class HybridGraphRetriever(CustomPGRetriever):
         self._cypher_retriever = TextToCypherRetriever(
             self.graph_store,
             llm=Settings.llm,
-            text_to_cypher_template= CYPHER_PROMPT
+            text_to_cypher_template=CYPHER_PROMPT
         )
 
     @timer
@@ -425,16 +427,17 @@ def run_queries(index: PropertyGraphIndex):
     # --- 查询模式: 自定义混合检索 vs. 基础向量检索 ---
     print("\n" + "=" * 60)
     print("--- 自定义混合检索 vs. 基础向量检索 ---")
-    query = "券商担任了哪些角色"
+    query = "最近香港加密货币行业搞得怎么样"
     print(f"问题: {query}")
 
     # --- 1. 自定义混合检索查询引擎 ---
     print("\n 正在构建自定义混合检索查询引擎...")
     hybrid_retriever = HybridGraphRetriever(
-        graph_store= index.property_graph_store,
+        graph_store=index.property_graph_store,
         index=index,
-        similarity_top_k=2,
-        community_expansion = True,
+        similarity_top_k=1,
+        community_expansion=True,
+        # verbose=True
     )
     custom_query_engine = RetrieverQueryEngine.from_args(
         retriever=hybrid_retriever,
@@ -445,14 +448,16 @@ def run_queries(index: PropertyGraphIndex):
     # 执行自定义查询
     print("\n" + "-" * 25 + " 执行自定义混合查询 " + "-" * 25)
     custom_response = custom_query_engine.query(query)
+    print("\n展开上下文:")
+    display(Markdown(f"<b>{custom_response}</b>"))
     print("\n[结果] 自定义混合查询的最终答案:")
     print(custom_response.response)
 
     hybrid_retriever.print_categorized_source_nodes(custom_response)
 
 
-
 if __name__ == "__main__":
     graph_index = load_existing_graph_index()
     if graph_index:
         run_queries(graph_index)
+    print('----------')

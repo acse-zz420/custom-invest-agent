@@ -318,7 +318,7 @@ Query_Parsing_Prompt_2 = ('''
 
     ### 机构识别矩阵
     ```mermaid
-    graph LR
+    rag_graph LR
     A[原始表述] --> B{{是否具名？}}
     B -->|是| C[标准化简称]
     B -->|“头部券商”| D[映射TOP5机构]

@@ -8,15 +8,16 @@ from config import *
 from specialists import get_specialist_agents
 from tool import timer
 
+
 import nest_asyncio
 
 # 应用补丁
 nest_asyncio.apply()
 @timer
 def main():
-    _,_,Settings.embed_model = get_embedding_model()
+    _, _, Settings.embed_model = get_embedding_model()
     llm = DoubaoToolLLM(api_key=API_KEY, model=TOOL_CALL_MODEL)
-    workflow = FinancialWorkflow(llm=llm, verbose=True,agents=get_specialist_agents())
+    workflow = FinancialWorkflow(llm=llm, verbose=True, agents=get_specialist_agents())
 
     print("\n🤖 金融分析工作流已准备就绪！请输入您的问题 (输入 'exit' 退出)。\n")
 
@@ -25,8 +26,6 @@ def main():
         user_input = input("👤 你: ")
         if user_input.lower() == 'exit':
             break
-
-
 
         try:
             async def run_task():
@@ -56,3 +55,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    print('-----------------')

@@ -7,7 +7,7 @@ from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core.settings import Settings
 from llama_index.core.tools import FunctionTool
 
-from graph.graph_query import HybridGraphRetriever
+from rag_graph.graph_query import HybridGraphRetriever
 from rag_milvus.rag_pipline import execute_rag_pipeline,get_sentence_embedding,get_reranker_model,retrieve_and_rerank_pipeline
 from prompt import CUSTOM_QA_TEMPLATE, CUSTOM_REFINE_TEMPLATE
 from llm import VolcengineLLM

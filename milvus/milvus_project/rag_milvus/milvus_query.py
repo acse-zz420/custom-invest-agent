@@ -8,7 +8,7 @@ from llama_index.core import PropertyGraphIndex
 from llama_index.graph_stores.neo4j import Neo4jPropertyGraphStore
 from watchfiles import awatch
 
-from graph.graph_query import HybridGraphRetriever
+from rag_graph.graph_query import HybridGraphRetriever
 from opentelemetry import trace
 from phoenix.client import Client
 from opentelemetry.trace import Status, StatusCode

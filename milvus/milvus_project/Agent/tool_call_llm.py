@@ -1,7 +1,7 @@
-import json,httpx
+import json, httpx
 from typing import Any, List, Optional
 
-from openai import AsyncOpenAI,OpenAI
+from openai import AsyncOpenAI, OpenAI
 from pydantic import PrivateAttr, SecretStr
 
 from llama_index.core.llms import (
@@ -34,6 +34,7 @@ from rag_milvus.config import API_KEY
 
 # ========= 火山豆包 Tool Calling 专用 LLM 类 =========
 
+
 class DoubaoToolLLM(CustomLLM):
     """
     一个专门为火山引擎豆包模型设计的、支持 Tool Calling 和异步操作的
@@ -41,7 +42,7 @@ class DoubaoToolLLM(CustomLLM):
     """
 
     model: str = Field(
-        default= TOOL_CALL_MODEL,
+        default=TOOL_CALL_MODEL,
         description="火山引擎豆包模型名称，例如 doubao-seed-1.6, doubao-pro-32k 等"
     )
     api_key: SecretStr = Field(description="火山引擎 API Key")
@@ -70,7 +71,6 @@ class DoubaoToolLLM(CustomLLM):
     ) -> None:
         # Pydantic v2 requires passing api_key as a SecretStr
         api_key_secret = SecretStr(api_key)
-
 
         super().__init__(
             model=model,
