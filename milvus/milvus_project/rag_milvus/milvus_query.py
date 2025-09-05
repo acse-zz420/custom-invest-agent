@@ -8,7 +8,7 @@ from llama_index.core import PropertyGraphIndex
 from llama_index.graph_stores.neo4j import Neo4jPropertyGraphStore
 from watchfiles import awatch
 
-from rag_graph.graph_query import HybridGraphRetriever
+from graph.graph_query import HybridGraphRetriever
 from opentelemetry import trace
 from phoenix.client import Client
 from opentelemetry.trace import Status, StatusCode
@@ -16,8 +16,7 @@ from llm import VolcengineLLM
 from rag_milvus.query_split import parse_query_to_json
 from rag_milvus.milvus_filter import query_milvus, bm25_enhanced_search,get_sentence_embedding
 from reranker import rerank_results, rerank_nodes
-from rag_milvus.config import  *
-from Agent.config import *
+from config import *
 from rag_milvus import tracing
 from rag_milvus.tracing import tracer,shutdown_tracer
 from llama_index.core.schema import NodeWithScore, TextNode

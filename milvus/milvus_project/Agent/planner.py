@@ -1,4 +1,3 @@
-from rag_milvus import tracing
 import json
 import re
 
@@ -11,16 +10,16 @@ from llama_index.core.workflow import (
 from llama_index.core.agent.workflow import AgentWorkflow
 from pyexpat.errors import messages
 
-from tools.calculator import *
-from tools.rag_tools import *
+from .tools.calculator import *
+from .tools.rag_tools import *
 from llama_index.core.llms import ChatMessage
 
-from agent_prompts import *
-from events import *
+from .agent_prompts import *
+from .events import *
 from llama_index.utils.workflow import draw_all_possible_flows
 
 class FinancialWorkflow(Workflow):
-    def __init__(self, llm: LLM, agents: Dict[str, AgentWorkflow], verbose: bool = False, max_loops:int=3):
+    def __init__(self, llm: LLM, agents: Dict[str, AgentWorkflow], verbose: bool = False, max_loops:int=2):
         super().__init__(
             timeout=300.0,
             verbose=verbose,
@@ -74,7 +73,7 @@ class FinancialWorkflow(Workflow):
             return response.message.content
 
         # 阶段 2: 本地执行
-        if self.verbose: print(f"--- 🔧 [{tool_category}]: LLM 决定调用工具... ---")
+        if self.verbose: print(f"--- [{tool_category}]: LLM 决定调用工具... ---")
         tool_outputs = []
         for call in tool_calls:
             tool_name = call.get("function", {}).get("name")
@@ -150,7 +149,7 @@ class FinancialWorkflow(Workflow):
     async def graph_retrieval_step(self, ev: RAGTriggerEvent) -> SearchResultEvent:
         if self.verbose: print(f"--- [Graph]: (循环 {ev.current_loop}) 开始并行查询... ---")
         nodes = await asyncio.to_thread(custom_graph_search, ev.query)
-        return SearchResultEvent(source="rag_graph", results=nodes, user_msg=ev.user_msg, query=ev.query,
+        return SearchResultEvent(source="graph", results=nodes, user_msg=ev.user_msg, query=ev.query,
                                  current_loop=ev.current_loop)
 
 
@@ -251,4 +250,4 @@ class FinancialWorkflow(Workflow):
             return RAGTriggerEvent(user_msg=ev.user_msg, query=new_query, current_loop=current_loop + 1)
 
 
-draw_all_possible_flows(FinancialWorkflow, filename="multi_step_workflow.html")
+# draw_all_possible_flows(FinancialWorkflow, filename="multi_step_workflow.html")

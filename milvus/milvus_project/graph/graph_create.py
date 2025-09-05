@@ -13,8 +13,8 @@ from llama_index.core.indices.property_graph import SimpleLLMPathExtractor
 from llama_index.core.indices.property_graph import SchemaLLMPathExtractor
 from llm import VolcengineLLM
 from prompt import EXTRACTOR_PROMPT, FINANCE_ENTITIES, FINANCE_RELATIONS, FINANCE_VALIDATION_SCHEMA
-from rag_milvus.config import get_embedding_model
-from rag_graph.config import API_KEY, NEO4J_USERNAME, NEO4J_PASSWORD, NEO4J_URI, NEO4J_DATABASE, MD_TEST_DIR
+from config import get_embedding_model
+from config import API_KEY, NEO4J_USERNAME, NEO4J_PASSWORD, NEO4J_URI, NEO4J_DATABASE, MD_TEST_DIR
 from hybrid_chunking import custom_chunk_pipeline
 
 # 配置日志
@@ -196,10 +196,10 @@ def run_leiden_community_detection(graph_store: Neo4jPropertyGraphStore):
         with graph_store._driver.session(database=NEO4J_DATABASE) as session:
             logging.info("检查 GDS 插件并清理旧的图投影...")
             try:
-                check_gds_query = "RETURN gds.rag_graph.exists($graph_name) AS exists"
+                check_gds_query = "RETURN gds.graph.exists($graph_name) AS exists"
                 result = session.run(check_gds_query, graph_name=graph_name)
                 if result.single()['exists']:
-                    session.run("CALL gds.rag_graph.drop($graph_name)", graph_name=graph_name)
+                    session.run("CALL gds.graph.drop($graph_name)", graph_name=graph_name)
                     logging.info(f"已删除旧的图投影 '{graph_name}'.")
             except Exception:
                 logging.error("GDS 插件似乎未安装或配置不正确。无法继续执行社区发现。")
@@ -210,7 +210,7 @@ def run_leiden_community_detection(graph_store: Neo4jPropertyGraphStore):
             # 将所有的 'entity' 节点和之间的所有关系投影到内存中
             logging.info(f"正在创建 GDS 图投影 '{graph_name}'...")
             project_query = """
-            CALL gds.rag_graph.project(
+            CALL gds.graph.project(
             $graph_name,
             '*',
             { ALL: { type: '*', orientation: 'UNDIRECTED' } }
@@ -238,7 +238,7 @@ def run_leiden_community_detection(graph_store: Neo4jPropertyGraphStore):
 
             # 清理 GDS 内存中的图投影
             logging.info(f"正在清理并删除 GDS 图投影 '{graph_name}'...")
-            session.run("CALL gds.rag_graph.drop($graph_name)", graph_name=graph_name)
+            session.run("CALL gds.graph.drop($graph_name)", graph_name=graph_name)
             logging.info("GDS 资源清理完毕。")
 
     except Exception as e:

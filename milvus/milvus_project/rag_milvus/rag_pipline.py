@@ -8,20 +8,20 @@ from llama_index.core import PropertyGraphIndex
 from llama_index.graph_stores.neo4j import Neo4jPropertyGraphStore
 from watchfiles import awatch
 
-from rag_graph.graph_query import HybridGraphRetriever
+from graph.graph_query import HybridGraphRetriever
 from opentelemetry import trace
 from phoenix.client import Client
 from opentelemetry.trace import Status, StatusCode
-from llm import VolcengineLLM
+from llm_ali import QwenToolLLM
 from rag_milvus.query_split import parse_query_to_json
 from rag_milvus.milvus_filter import query_milvus, bm25_enhanced_search,get_sentence_embedding
 from reranker import rerank_results, rerank_nodes
 from rag_milvus.config import  *
 from Agent.config import *
 from rag_milvus import tracing
-from rag_milvus.tracing import tracer,shutdown_tracer
 from llama_index.core.schema import NodeWithScore, TextNode
 from llama_index.core.settings import Settings
+from opentelemetry.trace import Tracer
 
 # _, _, Settings.embed_model = get_embedding_model()
 
@@ -423,6 +423,7 @@ def _graph_result_to_nodes(graph_results: List[Dict]) -> List[NodeWithScore]:
 async def retrieve_and_rerank_pipeline(
         query: str,
         llm: object,  # LLM 客户端实例
+        tracer: Tracer,
         collection_name: str,
         embedding_model_path: str,
         graph_index: Optional[PropertyGraphIndex] = None,
@@ -464,30 +465,30 @@ async def retrieve_and_rerank_pipeline(
             # 1. 基础检索：总是先从 Milvus 开始
             print(f"\n--- 阶段 2: 执行基础检索 (策略: {search_strategy}) ---")
 
-            if search_strategy == "normal" or search_strategy == "graph_enhanced":
-                # 对于 'normal' 和 'graph_enhanced'，使用语义搜索
-                print("  执行 Milvus 语义搜索...")
-                milvus_raw_results = await asyncio.to_thread(
-                    query_milvus,
-                    collection_name=collection_name, filters=filters, query_text=query,
-                    embedding_model_path=embedding_model_path, top_k=top_k_retrieval,
-                    search_threshold=search_threshold
-                )
+            milvus_raw_results = []
+            if search_strategy in ["normal", "bm25_enhanced", "graph_enhanced"]:
+                if search_strategy == "bm25_enhanced":
+                    print("  执行 Milvus BM25 增强混合搜索...")
+                    milvus_raw_results = await asyncio.to_thread(
+                        bm25_enhanced_search,
+                        collection_name=collection_name, query_text=query,
+                        embedding_model_path=embedding_model_path, filters=filters,
+                        top_k=top_k_retrieval, dense_embedding_function=dense_embedding_function
+                    )
+                else:  # "normal" 和 "graph_enhanced" 都使用语义搜索
+                    print("  执行 Milvus 语义搜索...")
+                    milvus_raw_results = await asyncio.to_thread(
+                        query_milvus,
+                        collection_name=collection_name, filters=filters, query_text=query,
+                        embedding_model_path=embedding_model_path, top_k=top_k_retrieval,
+                        search_threshold=search_threshold
+                    )
                 for res in milvus_raw_results:
                     res['source_type'] = 'milvus'
                 all_retrieved_results.extend(milvus_raw_results)
                 print(f"  Milvus 语义搜索找到 {len(milvus_raw_results)} 条结果。")
 
-            elif search_strategy == "bm25_enhanced":
-                print("  执行 Milvus BM25 增强混合搜索...")
-                milvus_raw_results = await asyncio.to_thread(
-                    bm25_enhanced_search,
-                    collection_name=collection_name, query_text=query,
-                    embedding_model_path=embedding_model_path, filters=filters,
-                    top_k=top_k_retrieval, dense_embedding_function=dense_embedding_function
-                )
-                all_retrieved_results.extend(milvus_raw_results)
-                print(f"  Milvus 混合搜索找到 {len(milvus_raw_results)} 条结果。")
+
 
             # 2. 增强检索：如果策略是 graph_enhanced，则加入图谱结果
             if search_strategy == "graph_enhanced" and graph_index:
@@ -547,7 +548,7 @@ async def retrieve_and_rerank_pipeline(
 
 async def main():
     query = "美债高压的成因及其对实体经济的影响是什么？"
-    llm = VolcengineLLM(api_key=API_KEY)
+    llm = QwenToolLLM()
 
     filter_fields = [
         "institution",
@@ -586,6 +587,9 @@ async def main():
             dense_embedding_function=get_sentence_embedding,
             reranker_model_function=get_reranker_model())
     print(f"The retrieved nodes are {result_nodes}")
+
+
+
 
 # if __name__ == "__main__":
 #     try:

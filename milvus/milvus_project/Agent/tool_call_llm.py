@@ -30,7 +30,7 @@ from llama_index.core.llms.custom import CustomLLM
 from llama_index.core.llms.llm import ToolSelection
 from llama_index.core.tools.types import BaseTool, ToolMetadata
 from config import VOL_URI, TOOL_CALL_MODEL
-from rag_milvus.config import API_KEY
+from config import API_KEY
 
 # ========= 火山豆包 Tool Calling 专用 LLM 类 =========
 

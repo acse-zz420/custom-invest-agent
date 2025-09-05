@@ -1,20 +1,19 @@
 from openai import api_key
 
 from llm import VolcengineLLM
-from tools.calculator import financial_tools
-from tools.rag_tools import rag_tools
+from .tools.calculator import financial_tools
+from .tools.rag_tools import rag_tools
 
 from llama_index.core.agent.workflow import FunctionAgent
 
-from tool_call_llm import DoubaoToolLLM
-from config import VOL_URI, TOOL_CALL_MODEL, API_KEY
+from llm_ali import QwenToolLLM
 
 
 def get_specialist_agents() -> dict[str: FunctionAgent]:
     """
     创建并返回一个包含所有专家智能体的列表。
     """
-    tool_llm = DoubaoToolLLM(api_key=API_KEY, model=TOOL_CALL_MODEL)
+    tool_llm = QwenToolLLM()
 
     # 1. 计算专家
     calculator_agent = FunctionAgent(

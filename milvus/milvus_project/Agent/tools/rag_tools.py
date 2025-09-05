@@ -7,14 +7,14 @@ from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core.settings import Settings
 from llama_index.core.tools import FunctionTool
 
-from rag_graph.graph_query import HybridGraphRetriever
-from rag_milvus.rag_pipline import execute_rag_pipeline,get_sentence_embedding,get_reranker_model,retrieve_and_rerank_pipeline
+from graph.graph_query import HybridGraphRetriever
+from rag_milvus.rag_pipeline_raw import get_sentence_embedding,get_reranker_model,retrieve_and_rerank_pipeline_test
 from prompt import CUSTOM_QA_TEMPLATE, CUSTOM_REFINE_TEMPLATE
-from llm import VolcengineLLM
-from Agent.config import *
+from llm_ali import QwenToolLLM
+from config import *
 from llama_index.core.schema import NodeWithScore, TextNode
 
-llm = VolcengineLLM(api_key=API_KEY)
+llm = QwenToolLLM()
 def custom_graph_search(query: str) -> List[NodeWithScore]:
     """
     使用混合图谱检索策略（向量+社区扩展）来回答关于实体关系的问题。
@@ -42,8 +42,6 @@ def custom_graph_search(query: str) -> List[NodeWithScore]:
     retrieved_nodes = hybrid_retriever.retrieve(query)
 
     print(f"[图谱检索工具] 检索到 {len(retrieved_nodes)} 个节点。")
-
-    # d. 直接返回结构化的节点列表
     return retrieved_nodes
 
 
@@ -61,7 +59,7 @@ async def custom_milvus_search(query: str) -> List[NodeWithScore]:
         # "date_range"
     ]
 
-    retrieved_nodes = await retrieve_and_rerank_pipeline(
+    retrieved_nodes = await retrieve_and_rerank_pipeline_test(
         query=query,
         llm=llm,
         collection_name="financial_reports",

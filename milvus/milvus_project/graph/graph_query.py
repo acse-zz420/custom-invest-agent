@@ -12,7 +12,6 @@ from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core.schema import NodeWithScore, TextNode
 
 from llm import VolcengineLLM
-from rag_milvus.config import get_embedding_model
 from config import *
 from tool import timer
 from prompt import CYPHER_PROMPT

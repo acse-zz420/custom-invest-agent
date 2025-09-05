@@ -412,7 +412,7 @@ if __name__ == "__main__":
     results4 = bm25_enhanced_search(
         collection_name=COLLECTION,
         query_text="针对房地产政策，有哪些可以完善的地方",
-        dense_embedding_function=get_sentence_embedding
+        dense_embedding_function=get_sentence_embedding,
         embedding_model_path=EMBEDDING_MODEL_PATH,
         filters=complex_filters,
         top_k=5
