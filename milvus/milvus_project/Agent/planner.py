@@ -21,7 +21,7 @@ from llama_index.utils.workflow import draw_all_possible_flows
 class FinancialWorkflow(Workflow):
     def __init__(self, llm: LLM, agents: Dict[str, AgentWorkflow], verbose: bool = False, max_loops:int=2):
         super().__init__(
-            timeout=300.0,
+            timeout=600.0,
             verbose=verbose,
         )
 

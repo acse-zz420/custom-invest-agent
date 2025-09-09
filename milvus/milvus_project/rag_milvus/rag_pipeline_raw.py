@@ -2,14 +2,12 @@ import json
 import asyncio
 import time
 import pandas as pd
-import phoenix as px
 from typing import Dict, List, Optional, Literal, Any
 from llama_index.core import PropertyGraphIndex
 from llama_index.graph_stores.neo4j import Neo4jPropertyGraphStore
 from watchfiles import awatch
 
 from graph.graph_query import HybridGraphRetriever
-from phoenix.client import Client
 from llm_ali import QwenToolLLM
 from rag_milvus.query_split import parse_query_to_json
 from rag_milvus.milvus_filter import query_milvus, bm25_enhanced_search,get_sentence_embedding
