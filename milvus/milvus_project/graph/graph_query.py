@@ -426,7 +426,7 @@ def run_queries(index: PropertyGraphIndex):
     # --- 查询模式: 自定义混合检索 vs. 基础向量检索 ---
     print("\n" + "=" * 60)
     print("--- 自定义混合检索 vs. 基础向量检索 ---")
-    query = "最近香港加密货币行业搞得怎么样"
+    query = "分析一下2024年半导体发展情况和面临挑战"
     print(f"问题: {query}")
 
     # --- 1. 自定义混合检索查询引擎 ---
