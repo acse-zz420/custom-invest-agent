@@ -1,15 +1,23 @@
 import torch
 from transformers import AutoTokenizer, AutoModel, AutoModelForSequenceClassification
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+import os
+from datetime import datetime, timedelta
+import logging
 
-MD_DIR = r"D:\yechuan\work\cjsx\RAG\report"
-MD_TEST_DIR = r"D:\yechuan\work\cjsx\Docker_milvus\milvus\report_test"
+# MD_DIR = r"D:\yechuan\work\cjsx\RAG\report"
+# MD_TEST_DIR = r"D:\yechuan\work\cjsx\Docker_milvus\milvus\report_test"
+MD_DIR = r"E:\financial_reports"
+MD_TEST_DIR = r"E:\financial_reports2"
 
 TOOL_CALL_MODEL = "ep-20250826172947-ntwcf"
 CHAT_MODEL = "ep-20250422130700-hfw6r"
 
-EMBEDDING_MODEL_PATH = r"D:\yechuan\work\cjsx\model\Qwen3-Embedding-0.6B"
-RERANK_MODEL_PATH = r"D:\yechuan\work\cjsx\model\bge-reranker-large"
+# EMBEDDING_MODEL_PATH = r"D:\yechuan\work\cjsx\model\Qwen3-Embedding-0.6B"
+# RERANK_MODEL_PATH = r"D:\yechuan\work\cjsx\model\bge-reranker-large"
+EMBEDDING_MODEL_PATH = r"D:\python_model\bge-large-zh-v1.5"
+RERANK_MODEL_PATH = r"D:\python_model\bge-reranker-large"
+
 
 # 火山
 API_KEY = "ff6acab6-c747-49d7-b01c-2bea59557b8d"
@@ -17,7 +25,7 @@ VOL_URI = "https://ark.cn-beijing.volces.com/api/v3"
 
 # 阿里
 ALI_API_KEY = "sk-390066d0ba8745cd94817d83668f0440"
-QWEN_MODEL = "qwen3-235b-a22b-thinking-2507"
+QWEN_MODEL = "qwen3-235b-a22b-instruct-2507"
 QWEN_URI = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
 MILVUS_URI = "http://localhost:19530"
@@ -26,13 +34,22 @@ MILVUS_DB_NAME = "default"
 
 NEO4J_URI = "neo4j://127.0.0.1:7687"
 NEO4J_USERNAME = "neo4j"
-NEO4J_PASSWORD = "yc123456"
+NEO4J_PASSWORD = "A+12345678"
 NEO4J_DATABASE = "neo4j"
 
 # Global variables to store the loaded models
 _embed_tokenizer = None
 _embed_model = None
 _embedding_model = None
+
+CURRENT_PATH = os.path.abspath(__file__)
+ROOT_PATH = os.path.split(CURRENT_PATH)[0]
+LOG_DIR = os.path.join(ROOT_PATH, 'log')
+logging.basicConfig(level=logging.INFO,
+                    filename=os.path.join(LOG_DIR, "global_log1.log"),
+                    filemode='a',
+                    format='%(asctime)s - %(pathname)s[line:%(lineno)d] - %(levelname)s: %(message)s'
+                    )
 
 
 def get_embedding_model():
@@ -74,6 +91,7 @@ def get_reranker_model():
         # Load tokenizer
         _rerank_tokenizer = AutoTokenizer.from_pretrained(
             RERANK_MODEL_PATH,
+            use_fast=False,  # 添加这个参数
         )
 
         # Load model

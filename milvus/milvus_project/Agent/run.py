@@ -10,6 +10,7 @@ from tool import timer
 
 
 import nest_asyncio
+import logging
 
 # 应用补丁
 nest_asyncio.apply()
@@ -20,6 +21,7 @@ def main():
     workflow = FinancialWorkflow(llm=llm, verbose=True, agents=get_specialist_agents())
 
     print("\n🤖 金融分析工作流已准备就绪！请输入您的问题 (输入 'exit' 退出)。\n")
+    logging.info("\n🤖 金融分析工作流已准备就绪！请输入您的问题 (输入 'exit' 退出)。\n")
 
     chat_history = []
     while True:
@@ -47,9 +49,10 @@ def main():
             chat_history.append(ChatMessage(role="assistant", content=final_response_text))
 
             print(f"\n🤖 Agent 最终回答: {final_response_text}\n")
+            logging.info(f"\n🤖 Agent 最终回答: {final_response_text}\n")
 
         except Exception as e:
-            print(f"\n❌ 工作流执行出错:")
+            print(f"\n❌ 工作流执行出错: {e}")
             traceback.print_exc()
 
 
