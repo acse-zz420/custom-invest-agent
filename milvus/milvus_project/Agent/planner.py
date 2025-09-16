@@ -10,12 +10,12 @@ from llama_index.core.workflow import (
 from llama_index.core.agent.workflow import AgentWorkflow
 from pyexpat.errors import messages
 
-from .tools.calculator import *
-from .tools.rag_tools import *
+from Agent.tools.financial_calculator import financial_calculator_tool
+from Agent.tools.rag_tools import *
 from llama_index.core.llms import ChatMessage
 
-from .agent_prompts import *
-from .events import *
+from Agent.agent_prompts import *
+from Agent.events import *
 from llama_index.utils.workflow import draw_all_possible_flows
 
 class FinancialWorkflow(Workflow):
@@ -30,10 +30,7 @@ class FinancialWorkflow(Workflow):
         self.verbose = verbose
         self.max_loops = max_loops
         self.tools = {
-            "Calculator": [
-                return_rate_tool,
-                volatility_tool
-            ],
+            "Calculator": [financial_calculator_tool],
             "DocumentSearch": [custom_vector_rag_tool],
             "KnowledgeGraph": [custom_graph_rag_tool],
         }
@@ -108,9 +105,12 @@ class FinancialWorkflow(Workflow):
         return final_result
     # 步骤 1: 规划 (Plan)
     @step
-    async def dispatcher_step(self, ev: UserInputEvent) -> RAGTriggerEvent | SimpleChatTriggerEvent:
+    async def dispatcher_step(self, ev: UserInputEvent) -> CalculatorTriggerEvent | RAGTriggerEvent | SimpleChatTriggerEvent:
         if self.verbose: print(f"--- [Dispatcher]: 分析请求 '{ev.user_msg}'... ---")
-        prompt = DISPATCHER_PROMPT.format(user_msg=ev.user_msg, chat_history=str(ev.chat_history))
+        prev_attempt_str = ev.previous_attempt if ev.previous_attempt else "无"
+        critique_str = ev.critique_feedback if ev.critique_feedback else "无"
+        prompt = DISPATCHER_PROMPT.format(user_msg=ev.user_msg, chat_history=str(ev.chat_history), previous_attempt=prev_attempt_str,
+            critique_feedback=critique_str)
         response = await self.llm.achat([ChatMessage(role="user", content=prompt)])
         try:
             raw_content = response.message.content or ""
@@ -118,6 +118,10 @@ class FinancialWorkflow(Workflow):
 
             cleaned_response = self._extract_json_from_response(raw_content)
             decision = json.loads(cleaned_response)
+
+            if decision.get("task_type") == "calculator":
+                if self.verbose: print(f"--- [Dispatcher]: 决策 -> 计算器路径 ---")
+                return CalculatorTriggerEvent(user_msg=ev.user_msg, query=ev.user_msg)
 
             if decision.get("task_type") == "retrieval":
 
@@ -134,6 +138,20 @@ class FinancialWorkflow(Workflow):
         if self.verbose: print(f"--- [SimpleChat]: 直接回答... ---")
         response = await self.llm.achat([ChatMessage(role="user", content=ev.user_msg)])
         return FinalOutputEvent(response=response.message.content)
+
+    # --- 路线 B: 金融因子计算 ---
+    @step
+    async def calculator_step(self, ev: CalculatorTriggerEvent) -> CritiqueEvent:
+        if self.verbose: print(f"--- [Calculator]: 开始执行计算任务... ---")
+
+        tool_result = await self._execute_tool_calling_step(
+            tool_category="Calculator",
+            user_input=ev.query
+        )
+
+        # 直接将工具执行结果作为最终答案
+        return CritiqueEvent(user_msg=ev.user_msg, final_context="", preliminary_answer=tool_result,
+                             current_loop=ev.current_loop)
 
     # --- 路线 B: RAG 流程 ---
 
@@ -154,7 +172,7 @@ class FinancialWorkflow(Workflow):
 
 
     @step
-    async def aggregator_step(self, ev: SearchResultEvent, ctx: Context) -> AggregatedContextEvent| None:
+    async def aggregator_step(self, ev: SearchResultEvent, ctx: Context) -> SummarizationEvent| None:
 
         search_results: List[SearchResultEvent] | None = ctx.collect_events(
             ev, expected=[SearchResultEvent, SearchResultEvent]
@@ -178,42 +196,13 @@ class FinancialWorkflow(Workflow):
             [f"来源: {n.node.metadata.get('file_name', 'N/A')}\n内容: {n.node.get_content()}" for n in final_nodes])
         ref_event = search_results[0]
 
-        return AggregatedContextEvent(
-            user_msg=ref_event.user_msg, query=ref_event.query, current_loop=ref_event.current_loop,
-            retrieved_nodes=final_nodes, fused_context=fused_context
+        return SummarizationEvent(
+            user_msg=ref_event.user_msg,
+            final_context=fused_context,
+            current_loop=ref_event.current_loop
         )
 
-    # 步骤 B.3: 判断是否需要计算
-    @step
-    async def calculation_check_step(self, ev: AggregatedContextEvent) -> CalculationEvent | SummarizationEvent:
-        if self.verbose: print(f"--- [CalcCheck]: 检查是否需要计算... ---")
-        prompt = CALCULATION_CHECK_PROMPT.format(user_msg=ev.user_msg, context=ev.fused_context)
-        response = await self.llm.achat([ChatMessage(role="user", content=prompt)])
-        raw_content = response.message.content or ""
-        if self.verbose: print(f"--- [Dispatcher]: LLM 返回的原始决策文本: '{raw_content}' ---")
 
-        cleaned_response = self._extract_json_from_response(raw_content)
-        decision = json.loads(cleaned_response)
-
-        if decision.get("calculation_needed"):
-            if self.verbose: print(f"--- [CalcCheck]: 需要计算。进入计算步骤... ---")
-            # 将所有状态传递给计算事件
-            return CalculationEvent(user_msg=ev.user_msg, calculation_details=decision.get("calculation_query"),
-                                    fused_context=ev.fused_context,current_loop=ev.current_loop)
-        else:
-            if self.verbose: print(f"--- [CalcCheck]: 无需计算。直接进入总结步骤... ---")
-            # 如果不需要计算，就直接用融合的上下文去生成答案
-            return SummarizationEvent(user_msg=ev.user_msg, final_context=ev.fused_context,current_loop=ev.current_loop)
-
-    # 步骤 B.4: 计算 (可选路径)
-    @step
-    async def calculation_step(self, ev: CalculationEvent) -> SummarizationEvent:
-        if self.verbose: print(f"--- [Calculator]: 执行计算... ---")
-        # (你需要一个 _execute_tool_calling_step 辅助函数)
-        calc_result = await self._execute_tool_calling_step("Calculator", ev.calculation_details)
-
-        final_context = f"检索到的信息:\n{ev.fused_context}\n\n计算结果:\n{calc_result}"
-        return SummarizationEvent(user_msg=ev.user_msg, final_context=final_context, current_loop=ev.current_loop)
 
     # 步骤 B.5: 生成最终答案
     @step
@@ -227,7 +216,7 @@ class FinancialWorkflow(Workflow):
 
     # 步骤 B.6: 质量评估与循环
     @step
-    async def quality_check_step(self, ev: CritiqueEvent) -> RAGTriggerEvent | FinalOutputEvent:
+    async def quality_check_step(self, ev: CritiqueEvent) -> UserInputEvent | FinalOutputEvent:
         if self.verbose: print(f"--- [Critique]: 评估草稿回答... ---")
         prompt = CRITIQUE_PROMPT.format(user_msg=ev.user_msg, draft_answer=ev.preliminary_answer)
         response = await self.llm.achat([ChatMessage(role="user", content=prompt)])
@@ -237,7 +226,17 @@ class FinancialWorkflow(Workflow):
         cleaned_response = self._extract_json_from_response(raw_content)
         critique = json.loads(cleaned_response)
 
+
         current_loop = ev.current_loop if hasattr(ev, 'current_loop') else 1
+
+        if ev.current_loop >= self.max_loops and not critique.get("is_sufficient"):
+            print(f"--- ⚠️  [Critique]: 已达到最大循环次数 ({self.max_loops})，强制结束。---")
+            # 返回上一轮的、虽然不完美但至少存在的答案
+            final_answer = (
+                f"我已经尽力了，但目前的答案可能仍不完美。\n"
+                f"这是我目前能给出的最好结果：\n\n{ev.preliminary_answer}"
+            )
+            return FinalOutputEvent(response=final_answer)
 
         if critique.get("is_sufficient") or current_loop >= self.max_loops:
             if not critique.get("is_sufficient"):
@@ -247,7 +246,8 @@ class FinancialWorkflow(Workflow):
         else:
             if self.verbose: print(f"--- [Critique]: 回答不理想。将基于修正建议重新开始检索... ---")
             new_query = f"原始问题: {ev.user_msg}\n修正建议: {critique.get('missing_information')}"
-            return RAGTriggerEvent(user_msg=ev.user_msg, query=new_query, current_loop=current_loop + 1)
+            return UserInputEvent(user_msg=ev.user_msg, query=new_query, previous_attempt=ev.preliminary_answer,
+                critique_feedback=critique.get('missing_information'), current_loop=current_loop + 1)
 
 
 # draw_all_possible_flows(FinancialWorkflow, filename="multi_step_workflow.html")

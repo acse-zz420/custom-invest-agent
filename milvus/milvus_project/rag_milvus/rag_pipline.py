@@ -7,7 +7,6 @@ from typing import Dict, List, Optional, Literal, Any
 from llama_index.core import PropertyGraphIndex
 from llama_index.graph_stores.neo4j import Neo4jPropertyGraphStore
 from watchfiles import awatch
-
 from graph.graph_query import HybridGraphRetriever
 from opentelemetry import trace
 from phoenix.client import Client
@@ -16,14 +15,14 @@ from llm_ali import QwenToolLLM
 from rag_milvus.query_split import parse_query_to_json
 from rag_milvus.milvus_filter import query_milvus, bm25_enhanced_search,get_sentence_embedding
 from reranker import rerank_results, rerank_nodes
-from rag_milvus.config import  *
-from Agent.config import *
-from rag_milvus import tracing
+from config import *
 from llama_index.core.schema import NodeWithScore, TextNode
 from llama_index.core.settings import Settings
 from opentelemetry.trace import Tracer
+from tracing import *
 
-# _, _, Settings.embed_model = get_embedding_model()
+_, _, Settings.embed_model = get_embedding_model()
+
 
 
 
@@ -423,7 +422,6 @@ def _graph_result_to_nodes(graph_results: List[Dict]) -> List[NodeWithScore]:
 async def retrieve_and_rerank_pipeline(
         query: str,
         llm: object,  # LLM 客户端实例
-        tracer: Tracer,
         collection_name: str,
         embedding_model_path: str,
         graph_index: Optional[PropertyGraphIndex] = None,
@@ -560,10 +558,10 @@ async def main():
     graph_index = None
     try:
         graph_store = Neo4jPropertyGraphStore(
-            username=NEO4J_USERNAME,
-            password=NEO4J_PASSWORD,
-            url=NEO4J_URI,
-            database=NEO4J_DATABASE,
+            username=AURA_DB_USER_NAME,  # 使用实际的用户名变量
+            password=AURA_DB_PASSWORD,
+            url=AURA_URI,
+            database=AURA_DATABASE,
         )
         graph_index = PropertyGraphIndex.from_existing(
             property_graph_store=graph_store,
@@ -591,9 +589,9 @@ async def main():
 
 
 
-# if __name__ == "__main__":
-#     try:
-#         asyncio.run(main())
-#     except KeyboardInterrupt:
-#         print("\n测试被用户中断。")
-#     tracing.shutdown_tracer()
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n测试被用户中断。")
+    shutdown_tracer()

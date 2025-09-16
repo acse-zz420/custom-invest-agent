@@ -24,10 +24,10 @@ def custom_graph_search(query: str) -> List[NodeWithScore]:
 
     # a. 从已有的 Property Graph Store 创建索引对象
     graph_store = Neo4jPropertyGraphStore(
-        username=NEO4J_USERNAME,
-        password=NEO4J_PASSWORD,
-        url=NEO4J_URI,
-        database=NEO4J_DATABASE
+        username=AURA_DB_USER_NAME,  # 使用实际的用户名变量
+        password=AURA_DB_PASSWORD,
+        url=AURA_URI,
+        database=AURA_DATABASE,
     )
     index = PropertyGraphIndex.from_existing(property_graph_store=graph_store)
 

@@ -18,6 +18,8 @@ from prompt import CYPHER_PROMPT
 
 from IPython.display import display, Markdown
 
+Settings.llm = VolcengineLLM(api_key=API_KEY)
+_, _, Settings.embed_model = get_embedding_model()
 
 class HybridGraphRetriever(CustomPGRetriever):
     """
@@ -72,7 +74,7 @@ class HybridGraphRetriever(CustomPGRetriever):
 
         # 1. 从入口Chunk中提取提及的实体ID
         mentioned_entity_ids = set()
-        with self.graph_store._driver.session(database=NEO4J_DATABASE) as session:
+        with self.graph_store._driver.session(database=AURA_DATABASE) as session:
             cypher_get_entities = """
             UNWIND $chunk_ids AS chunk_id
             MATCH (c:Chunk {id: chunk_id})-[:MENTIONS]->(e:__Entity__)
@@ -89,7 +91,7 @@ class HybridGraphRetriever(CustomPGRetriever):
 
         # 2. 查询这些实体的社区ID
         community_ids_to_expand = set()
-        with self.graph_store._driver.session(database=NEO4J_DATABASE) as session:
+        with self.graph_store._driver.session(database=AURA_DATABASE) as session:
             cypher_get_ids = """
             UNWIND $entity_ids AS entity_id
             MATCH (n:__Entity__ {id: entity_id})
@@ -107,7 +109,7 @@ class HybridGraphRetriever(CustomPGRetriever):
 
         # 3. 获取这些社区的所有实体关联的文本块 (Chunk)
         community_nodes_map = {}
-        with self.graph_store._driver.session(database=NEO4J_DATABASE) as session:
+        with self.graph_store._driver.session(database=AURA_DATABASE) as session:
             for comm_id in community_ids_to_expand:
                 cypher_get_community_chunks = """
                 MATCH (source_node:Chunk)-[:MENTIONS]->(n:__Entity__)
@@ -289,7 +291,7 @@ class HybridGraphRetriever(CustomPGRetriever):
             try:
                 # 从入口节点中提取它们所属的社区ID
                 entry_community_ids = set()
-                with self.graph_store._driver.session(database=NEO4J_DATABASE) as session:
+                with self.graph_store._driver.session(database=AURA_DATABASE) as session:
                     chunk_ids = [n.node.node_id for n in entry_nodes]
                     cypher_get_comm_ids = """
                     UNWIND $chunk_ids AS c_id
@@ -305,7 +307,7 @@ class HybridGraphRetriever(CustomPGRetriever):
                     print("    - 入口节点未关联到任何社区。")
                 else:
                     print(f"    - 入口节点关联到社区: {list(entry_community_ids)}")
-                    with self.graph_store._driver.session(database=NEO4J_DATABASE) as session:
+                    with self.graph_store._driver.session(database=AURA_DATABASE) as session:
                         cypher_relations = """
                         UNWIND $comm_ids AS c_id
                         MATCH (n:__Entity__ {leidenCommunityId: c_id})-[r]-(m:__Entity__ {leidenCommunityId: c_id})
@@ -370,7 +372,7 @@ class HybridGraphRetriever(CustomPGRetriever):
         if not id_list:
             return
         try:
-            with self.graph_store._driver.session(database=NEO4J_DATABASE) as session:
+            with self.graph_store._driver.session(database=AURA_DATABASE) as session:
                 cypher_query = """
                 UNWIND $id_list AS chunk_id_param
                 MATCH (c:Chunk {id: chunk_id_param})
@@ -398,15 +400,14 @@ class HybridGraphRetriever(CustomPGRetriever):
 def load_existing_graph_index():
     """从现有的 Neo4j 数据库中加载 PropertyGraphIndex。"""
     print("正在配置 LLM 和嵌入模型...")
-    Settings.llm = VolcengineLLM(api_key=API_KEY)
-    _, _, Settings.embed_model = get_embedding_model()
+
 
     print("正在连接到 Neo4j 并加载现有图谱索引...")
     graph_store = Neo4jPropertyGraphStore(
-        username=NEO4J_USERNAME,
-        password=NEO4J_PASSWORD,
-        url=NEO4J_URI,
-        database=NEO4J_DATABASE
+        username=AURA_DB_USER_NAME,  # 使用实际的用户名变量
+        password=AURA_DB_PASSWORD,
+        url=AURA_URI,
+        database=AURA_DATABASE,
     )
     index = PropertyGraphIndex.from_existing(property_graph_store=graph_store)
     print("图谱索引加载成功！")

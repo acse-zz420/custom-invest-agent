@@ -93,8 +93,8 @@ def query_milvus(
         embedding_model_path: Optional[str] = None,
         top_k: int = 10,
         search_threshold: float = 0.5,
-        host: str = "localhost",
-        port: str = "19530",
+        uri: str = ZILLIZ_URI,
+        token: str = ZILLIZ_TOKEN,
 ) -> List[Dict[str, Any]]:
     """
     查询 Milvus 集合，支持复杂的元数据筛选和可选的语义向量搜索。
@@ -110,8 +110,8 @@ def query_milvus(
         embedding_model_path (Optional[str]): 嵌入模型的本地路径。仅在提供了 query_text 时需要。
         top_k (int): 返回结果的最大数量。
         search_threshold (float): 语义搜索的相似度阈值 (对于IP度量, 越高越相关)。
-        host (str): Milvus 服务主机。
-        port (str): Milvus 服务端口。
+        uri (str): Zilliz uri。
+        token (str): Zilliz token。
 
     Returns:
         List[Dict[str, Any]]: 查询结果列表，或在无结果时返回空列表。
@@ -120,8 +120,8 @@ def query_milvus(
     if query_text and not embedding_model_path:
         raise ValueError("当提供 query_text 进行语义搜索时，必须指定 embedding_model_path。")
 
-    print(f"开始连接 Milvus server at {host}:{port}...")
-    connections.connect(alias="default", host=host, port=port)
+    print(f"开始连接 Milvus server ")
+    connections.connect(alias="default", uri=ZILLIZ_URI, token=ZILLIZ_TOKEN)
     print("Milvus 连接成功。")
 
     try:
@@ -191,12 +191,12 @@ def query_milvus(
         print("Milvus 连接已断开。")
 
 @timer
-def get_all_nodes_from_milvus(collection_name: str, host: str, port: str) -> List[TextNode]:
+def get_all_nodes_from_milvus(collection_name: str, uri: str, token: str) -> List[TextNode]:
     """从Milvus中获取所有文档，并转换为LlamaIndex的TextNode对象。"""
     print("正在从 Milvus 加载所有节点以初始化BM25...")
     nodes = []
     try:
-        connections.connect( host=host, port=port)
+        connections.connect( uri=ZILLIZ_URI, token=ZILLIZ_TOKEN)
         if not utility.has_collection(collection_name):
             return []
 
@@ -233,12 +233,14 @@ def bm25_enhanced_search(
         query_text: str,
         dense_embedding_function: object,  # 密集向量编码器实例
         embedding_model_path: str,
-        host: str = "localhost",
-        port: str = "19530",
         top_k: int = 10,
         filters: Optional[List[Dict]] = None,
+        uri: str = ZILLIZ_URI,
+        token: str = ZILLIZ_TOKEN,
         pk_field: str = "doc_id",
-        text_field: str = "text"):
+        text_field: str = "text",
+        metadata_field:  str = "metadata"
+):
     """
     使用 PyMilvus 原生稀疏向量功能执行带有元数据过滤的混合搜索。
 
@@ -258,9 +260,9 @@ def bm25_enhanced_search(
 
     # --- 1. 初始化连接和功能组件 ---
     try:
-        client = MilvusClient(uri=f"http://{host}:{port}")
+        client = MilvusClient(uri=ZILLIZ_URI, token=ZILLIZ_TOKEN)
         if not connections.has_connection("default"):
-            connections.connect("default", host=host, port=port)
+            connections.connect("default", uri=ZILLIZ_URI, token=ZILLIZ_TOKEN)
             print("Milvus 连接成功。")
         collection = Collection(collection_name)
     except Exception as e:
@@ -288,7 +290,7 @@ def bm25_enhanced_search(
         filter=filter_expr,
         search_params={"metric_type": "IP", "params": {"drop_ratio_search": 0.2}},
         collection_name=collection_name,
-        output_fields=[pk_field, text_field]
+        output_fields=[pk_field, text_field, metadata_field]
     )
     print(f"在满足过滤器的文档中，密集搜索找到 {len(dense_results[0])} 个语义相关结果。")
 
@@ -301,7 +303,7 @@ def bm25_enhanced_search(
         filter=filter_expr,
         search_params={"metric_type": "BM25", "params": {"drop_ratio_search": 0.2}},
         collection_name=collection_name,
-        output_fields=[pk_field, text_field]
+        output_fields=[pk_field, text_field, metadata_field]
     )
     print(f"在满足过滤器的文档中，BM25搜索找到 {len(sparse_results[0])} 个关键词匹配结果。")
 
@@ -313,18 +315,22 @@ def bm25_enhanced_search(
     # 处理密集搜索结果
     for hit in dense_results[0]:
         doc_id = hit["doc_id"]
+        entity_data = hit.get("entity", {})
         final_results[doc_id] = {
             "doc_id": doc_id,
             "text": hit["entity"][text_field],
             "semantic_score": hit["distance"],
             "bm25_score": 0.0,
-            "found_by": ["semantic"]
+            "found_by": ["semantic"],
+            "metadata": entity_data
+
         }
 
     # 处理并合并稀疏搜索结果
     for hit in sparse_results[0]:
         doc_id = hit["doc_id"]
         bm25_score = hit["distance"]
+        entity_data = hit.get("entity", {})
 
         if doc_id in final_results:
             final_results[doc_id]["bm25_score"] = bm25_score
@@ -335,11 +341,28 @@ def bm25_enhanced_search(
                 "text": hit["entity"][text_field],
                 "semantic_score": -1.0,
                 "bm25_score": bm25_score,
-                "found_by": ["bm25"]
+                "found_by": ["bm25"],
+                "metadata": entity_data
             }
-    # 按 BM25 分数 + 语义分数综合排序
+
+    results_list = list(final_results.values())
+    formatted_results = []
+    for res in results_list:
+        file_name = res.get("metadata", {}).get("metadata", {}).get("file_name", "Unknown File")
+
+        # 构建只包含所需字段的新字典
+        clean_result = {
+            "doc_id": res.get("doc_id"),
+            "text": res.get("text"),
+            "file_name": file_name,
+            "semantic_score": res.get("semantic_score", 0.0),
+            "bm25_score": res.get("bm25_score", 0.0)
+        }
+        formatted_results.append(clean_result)
+
+        # 3. 对格式化后的结果进行排序
     sorted_results = sorted(
-        list(final_results.values()),
+        formatted_results,  # <--- 对新的、干净的列表进行排序
         key=lambda x: x["bm25_score"] + x["semantic_score"],
         reverse=True
     )
@@ -349,7 +372,7 @@ def bm25_enhanced_search(
         print("没有找到任何满足所有条件的结果。")
 
     for i, res in enumerate(sorted_results):
-        print(f"[{i + 1}] Doc ID: {res['doc_id']} (Found by: {', '.join(res['found_by'])})")
+        print(f"File_name: {res['file_name']})")
         print(f"    Semantic Score (IP distance): {res['semantic_score']:.4f}")
         print(f"    BM25 Score: {res['bm25_score']:.4f}")
         print(f"    Text: {res['text'][:150].strip() if res['text'] else 'N/A'}...")

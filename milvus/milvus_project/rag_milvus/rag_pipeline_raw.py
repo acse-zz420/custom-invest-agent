@@ -224,20 +224,36 @@ def retrieve_from_graph(
 
 
 def _milvus_result_to_nodes(milvus_results: List[Dict]) -> List[NodeWithScore]:
-    """将 Milvus 的原始字典结果转换为 NodeWithScore 对象列表"""
+    """
+    将 Milvus 的原始字典结果，精准地转换为 NodeWithScore 对象列表。
+    只包含 text, id_, 和包含 file_name 的 metadata。
+    """
     nodes = []
     for res in milvus_results:
-        # 创建一个 TextNode 对象
+        # --- 1. 从 res 字典中提取所有需要的信息 ---
+
+        text_content = res.get("text", "")
+        node_id = res.get("doc_id", f"milvus_{res.get('id', '')}")
+
+        # 将两个分数中较高的一个作为最终分数，或者自定义融合逻辑
+        score = max(res.get("semantic_score", 0.0), res.get("bm25_score", 0.0))
+
+        # 从 res 字典中直接获取 file_name
+        file_name = res.get("file_name", "Unknown Milvus File")
+
+        # --- 2. 创建一个 TextNode ---
         node = TextNode(
-            text=res.get("text", ""),
-            doc_id=res.get("doc_id",""),
-            # 将所有 Milvus 的元数据（包括 file_id）都放入 metadata
+            text=text_content,
+            id_=node_id,
             metadata={
-                "source_type": "milvus",  # 添加来源标识
-                **res.get("metadata", {})  # 将其他元数据也加进去
+                "source_type": "milvus",
+                "file_name": file_name,
             }
         )
-        nodes.append(NodeWithScore(node=node, score=res.get("similarity_score")))
+
+        # 3. 创建 NodeWithScore
+        nodes.append(NodeWithScore(node=node, score=score))
+
     return nodes
 
 
@@ -253,6 +269,7 @@ def _graph_result_to_nodes(graph_results: List[Dict]) -> List[NodeWithScore]:
             }
         )
         nodes.append(NodeWithScore(node=node, score=res.get("similarity_score")))
+
     return nodes
 
 
@@ -301,6 +318,7 @@ async def retrieve_and_rerank_pipeline_test(
                 embedding_model_path=embedding_model_path, filters=filters,
                 top_k=top_k_retrieval, dense_embedding_function=dense_embedding_function
             )
+
         else:
             print("  执行 Milvus 语义搜索...")
             milvus_raw_results = await asyncio.to_thread(
@@ -358,6 +376,5 @@ async def retrieve_and_rerank_pipeline_test(
     else:
         all_initial_nodes.sort(key=lambda x: x.score or 0.0, reverse=True)
         final_nodes = all_initial_nodes[:top_k_rerank]
-
     print(f"--- Pipeline 执行完毕 ---")
     return final_nodes

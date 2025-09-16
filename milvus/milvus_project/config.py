@@ -8,7 +8,8 @@ MD_TEST_DIR = r"D:\yechuan\work\cjsx\Docker_milvus\milvus\report_test"
 TOOL_CALL_MODEL = "ep-20250826172947-ntwcf"
 CHAT_MODEL = "ep-20250422130700-hfw6r"
 
-EMBEDDING_MODEL_PATH = r"D:\yechuan\work\cjsx\model\Qwen3-Embedding-0.6B"
+# EMBEDDING_MODEL_PATH = r"D:\yechuan\work\cjsx\model\Qwen3-Embedding-0.6B"
+EMBEDDING_MODEL_PATH = r"D:\yechuan\work\cjsx\model\bge-large-zh-v1.5"
 RERANK_MODEL_PATH = r"D:\yechuan\work\cjsx\model\bge-reranker-large"
 
 # 火山
@@ -18,17 +19,25 @@ VOL_URI = "https://ark.cn-beijing.volces.com/api/v3"
 # 阿里
 ALI_API_KEY = "sk-390066d0ba8745cd94817d83668f0440"
 QWEN_MODEL = "qwen3-235b-a22b-thinking-2507"
+# QWEN_MODEL = " qwen3-235b-a22b-instruct-2507"
 QWEN_URI = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
 MILVUS_URI = "http://localhost:19530"
 MILVUS_COLLECTION = "financial_reports"
 MILVUS_DB_NAME = "default"
 
+ZILLIZ_URI = "https://in03-5fd74f929106ac7.serverless.aws-eu-central-1.cloud.zilliz.com"
+ZILLIZ_TOKEN = "5a4b4e50804f22ee947df548372a8c3b3dd2a359aa4554b217a977dec6b2c1b6f7edc9fec4919ee2448a2233973ecaf246a562f7"
+
 NEO4J_URI = "neo4j://127.0.0.1:7687"
 NEO4J_USERNAME = "neo4j"
 NEO4J_PASSWORD = "yc123456"
 NEO4J_DATABASE = "neo4j"
 
+AURA_DB_USER_NAME = "neo4j"
+AURA_DB_PASSWORD = "Uw6X1jgtD4o7emarIc11M3rV4vjs5Ghe4zvmYaEdQSk"
+AURA_URI = "neo4j+s://10dec418.databases.neo4j.io"
+AURA_DATABASE = "neo4j"
 # Global variables to store the loaded models
 _embed_tokenizer = None
 _embed_model = None

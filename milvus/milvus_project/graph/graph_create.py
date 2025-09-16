@@ -14,7 +14,7 @@ from llama_index.core.indices.property_graph import SchemaLLMPathExtractor
 from llm import VolcengineLLM
 from prompt import EXTRACTOR_PROMPT, FINANCE_ENTITIES, FINANCE_RELATIONS, FINANCE_VALIDATION_SCHEMA
 from config import get_embedding_model
-from config import API_KEY, NEO4J_USERNAME, NEO4J_PASSWORD, NEO4J_URI, NEO4J_DATABASE, MD_TEST_DIR
+from config import API_KEY, AURA_URI, AURA_DB_PASSWORD, AURA_DB_USER_NAME, AURA_DATABASE, MD_TEST_DIR
 from hybrid_chunking import custom_chunk_pipeline
 
 # 配置日志
@@ -71,17 +71,17 @@ def json_parser(response_str: str) -> List[Tuple[str, str, str]]:
 @timer
 def get_neo4j_graph_store():
     """初始化并验证 Neo4j 连接，返回 graph_store 实例"""
-    logging.info(f"正在初始化 Neo4jPropertyGraphStore，数据库: {NEO4J_DATABASE}...")
+    logging.info(f"正在初始化 Neo4jPropertyGraphStore，数据库: {AURA_DATABASE}...")
     try:
         graph_store = Neo4jPropertyGraphStore(
-            username=NEO4J_USERNAME,  # 使用实际的用户名变量
-            password=NEO4J_PASSWORD,
-            url=NEO4J_URI,
-            database=NEO4J_DATABASE,
+            username=AURA_DB_USER_NAME,  # 使用实际的用户名变量
+            password=AURA_DB_PASSWORD,
+            url=AURA_URI,
+            database=AURA_DATABASE,
         )
 
         logging.info("验证 Neo4j 连接和写入权限...")
-        with graph_store._driver.session(database=NEO4J_DATABASE) as session:
+        with graph_store._driver.session(database=AURA_DATABASE) as session:
             session.run("CREATE (n:TestNode {id: 'test_connection'})")
             result = session.run("MATCH (n:TestNode {id: 'test_connection'}) RETURN count(n) AS count")
             count = result.single()["count"]
@@ -157,7 +157,7 @@ def verify_extraction_results(graph_store: Neo4jPropertyGraphStore):
     try:
         # 查询实体
         entity_query = "MATCH (n:entity) RETURN n.id AS id, n.label AS type, n.description AS description LIMIT 25"
-        with graph_store._driver.session(database=NEO4J_DATABASE) as session:
+        with graph_store._driver.session(database=AURA_DATABASE) as session:
             entity_results = session.run(entity_query).data()
 
         logging.info(f"提取到 {len(entity_results)} 个实体：")
@@ -167,7 +167,7 @@ def verify_extraction_results(graph_store: Neo4jPropertyGraphStore):
 
         # 查询关系
         relation_query = "MATCH (a)-[r]->(b) RETURN a.id AS head, type(r) AS relation, b.id AS tail LIMIT 25"
-        with graph_store._driver.session(database=NEO4J_DATABASE) as session:
+        with graph_store._driver.session(database=AURA_DATABASE) as session:
             relation_results = session.run(relation_query).data()
 
         logging.info(f"提取到 {len(relation_results)} 个关系：")
@@ -193,7 +193,7 @@ def run_leiden_community_detection(graph_store: Neo4jPropertyGraphStore):
     write_property_name = "leidenCommunityId"
 
     try:
-        with graph_store._driver.session(database=NEO4J_DATABASE) as session:
+        with graph_store._driver.session(database=AURA_DATABASE) as session:
             logging.info("检查 GDS 插件并清理旧的图投影...")
             try:
                 check_gds_query = "RETURN gds.graph.exists($graph_name) AS exists"
@@ -283,7 +283,7 @@ def build_property_graph():
         )
 
         # 5. 验证结果
-        with graph_store._driver.session(database=NEO4J_DATABASE) as session:
+        with graph_store._driver.session(database=AURA_DATABASE) as session:
             result = session.run("MATCH (n) RETURN count(n) AS node_count")
             node_count = result.single()["node_count"]
             logging.info(f"图谱构建完成，Neo4j 中总节点数: {node_count}")

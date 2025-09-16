@@ -1,7 +1,7 @@
 from openai import api_key
 
 from llm import VolcengineLLM
-from .tools.calculator import financial_tools
+from .tools.financial_calculator import financial_calculator_tool
 from .tools.rag_tools import rag_tools
 
 from llama_index.core.agent.workflow import FunctionAgent
@@ -17,7 +17,7 @@ def get_specialist_agents() -> dict[str: FunctionAgent]:
 
     # 1. 计算专家
     calculator_agent = FunctionAgent(
-        tools=financial_tools,
+        tools=[financial_calculator_tool],
         llm=tool_llm,
         name="CalculatorAgent",
         description="用于执行精确的金融计算，如收益率、波动率等。",
