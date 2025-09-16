@@ -23,3 +23,9 @@
 2025-09-16 13:56:47,953 - D:\yechuan\work\cjsx\custom-invest-agent\Agent\planner.py[line:150] - INFO: --- [Graph]: (循环 1) 开始并行查询... ---
 2025-09-16 13:56:47,955 - D:\yechuan\work\cjsx\custom-invest-agent\Agent\planner.py[line:143] - INFO: --- [Milvus]: (循环 1) 开始并行检索... ---
 2025-09-16 13:57:01,884 - D:\yechuan\work\cjsx\RAG\.venv\Lib\site-packages\httpx\_client.py[line:1025] - INFO: HTTP Request: POST https://ark.cn-beijing.volces.com/api/v3/chat/completions "HTTP/1.1 200 OK"
+2025-09-16 16:01:39,585 - D:\yechuan\work\cjsx\RAG\.venv\Lib\site-packages\sentence_transformers\SentenceTransformer.py[line:227] - INFO: Load pretrained SentenceTransformer: D:\yechuan\work\cjsx\model\bge-large-zh-v1.5
+2025-09-16 16:02:08,515 - D:\yechuan\work\cjsx\RAG\.venv\Lib\site-packages\httpx\_client.py[line:1740] - INFO: HTTP Request: POST https://ark.cn-beijing.volces.com/api/v3/chat/completions "HTTP/1.1 200 OK"
+2025-09-16 16:02:20,698 - D:\yechuan\work\cjsx\RAG\.venv\Lib\site-packages\httpx\_client.py[line:1025] - INFO: HTTP Request: POST https://ark.cn-beijing.volces.com/api/v3/chat/completions "HTTP/1.1 200 OK"
+2025-09-16 16:03:42,579 - D:\yechuan\work\cjsx\RAG\.venv\Lib\site-packages\httpx\_client.py[line:1025] - INFO: HTTP Request: POST https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions "HTTP/1.1 200 OK"
+2025-09-16 16:04:33,344 - D:\yechuan\work\cjsx\RAG\.venv\Lib\site-packages\httpx\_client.py[line:1740] - INFO: HTTP Request: POST https://ark.cn-beijing.volces.com/api/v3/chat/completions "HTTP/1.1 200 OK"
+2025-09-16 16:04:46,761 - D:\yechuan\work\cjsx\RAG\.venv\Lib\site-packages\httpx\_client.py[line:1740] - INFO: HTTP Request: POST https://ark.cn-beijing.volces.com/api/v3/chat/completions "HTTP/1.1 200 OK"

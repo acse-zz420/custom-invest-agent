@@ -45,3 +45,4 @@ def get_specialist_agents() -> dict[str: FunctionAgent]:
     return {"CalculatorAgent":calculator_agent,"DocumentSearchAgent":vector_rag_agent,"KnowledgeGraphAgent":graph_rag_agent}
 
 
+
