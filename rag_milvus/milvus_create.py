@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import List, Tuple
 
 
-from tool import timer
+from timer_tool import timer
 
 # 本地模块
 from llm import VolcengineLLM

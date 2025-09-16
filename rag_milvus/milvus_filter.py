@@ -1,5 +1,5 @@
 import numpy as np
-from tool import timer
+from timer_tool import timer
 from typing import Dict, List, Optional, Any
 from milvus_construct import get_sentence_embedding
 from pymilvus import MilvusClient, connections, Collection, utility
