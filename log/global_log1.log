@@ -1,0 +1,25 @@
+2025-09-16 13:56:04,763 - D:\yechuan\work\cjsx\RAG\.venv\Lib\site-packages\sentence_transformers\SentenceTransformer.py[line:227] - INFO: Load pretrained SentenceTransformer: D:\yechuan\work\cjsx\model\Qwen3-Embedding-0.6B
+2025-09-16 13:56:09,603 - D:\yechuan\work\cjsx\RAG\.venv\Lib\site-packages\sentence_transformers\SentenceTransformer.py[line:378] - INFO: 1 prompt is loaded, with the key: query
+2025-09-16 13:56:24,587 - D:\yechuan\work\cjsx\custom-invest-agent\Agent\run.py[line:24] - INFO: 
+\U0001f916 金融分析工作流已准备就绪！请输入您的问题 (输入 'exit' 退出)。
+
+2025-09-16 13:56:43,848 - D:\yechuan\work\cjsx\custom-invest-agent\Agent\planner.py[line:112] - INFO: --- [Dispatcher]: 分析请求 '特朗普当选对美元走势影响'... ---
+2025-09-16 13:56:43,850 - D:\yechuan\work\cjsx\custom-invest-agent\Agent\tool_call_llm.py[line:188] - INFO: 
+==================== [DoubaoToolLLM Debug: Final OpenAI Payload] ====================
+2025-09-16 13:56:43,851 - D:\yechuan\work\cjsx\custom-invest-agent\Agent\tool_call_llm.py[line:189] - INFO: {
+  "model": "ep-20250826172947-ntwcf",
+  "messages": [
+    {
+      "role": "user",
+      "content": "\n你的任务是分析用户的请求，并从下面的任务类型列表中，判断出最合适的任务类型。\n你必须只返回一个严格的、有效的 JSON 对象，该对象必须包含 \"task_type\" 和 \"query\" 这两个键。\n不要在 JSON 对象前后添加任何额外的文字、解释或代码块标记。\n\n## 可选的任务类型 ##\n- \"retrieval\": 用于需要查找信息、事实、原因或影响的问题。\n- \"simple_chat\": 用于简单的问候、闲聊或不需要调用外部工具的常识性问题。\n\n## 用户请求 ##\n特朗普当选对美元走势影响\n\n## 你的 JSON 响应 ##\n"
+    }
+  ]
+}
+2025-09-16 13:56:43,851 - D:\yechuan\work\cjsx\custom-invest-agent\Agent\tool_call_llm.py[line:190] - INFO: ================================================================================
+
+2025-09-16 13:56:47,945 - D:\yechuan\work\cjsx\RAG\.venv\Lib\site-packages\httpx\_client.py[line:1740] - INFO: HTTP Request: POST https://ark.cn-beijing.volces.com/api/v3/chat/completions "HTTP/1.1 200 OK"
+2025-09-16 13:56:47,953 - D:\yechuan\work\cjsx\custom-invest-agent\Agent\planner.py[line:117] - INFO: --- [Dispatcher]: LLM 返回的原始决策文本: '{"task_type":"retrieval","query":"特朗普当选对美元走势影响"}' ---
+2025-09-16 13:56:47,953 - D:\yechuan\work\cjsx\custom-invest-agent\Agent\planner.py[line:51] - INFO: --- [JSON Extractor]: 成功提取到 JSON: '{"task_type":"retrieval","query":"特朗普当选对美元走势影响"}' ---
+2025-09-16 13:56:47,953 - D:\yechuan\work\cjsx\custom-invest-agent\Agent\planner.py[line:150] - INFO: --- [Graph]: (循环 1) 开始并行查询... ---
+2025-09-16 13:56:47,955 - D:\yechuan\work\cjsx\custom-invest-agent\Agent\planner.py[line:143] - INFO: --- [Milvus]: (循环 1) 开始并行检索... ---
+2025-09-16 13:57:01,884 - D:\yechuan\work\cjsx\RAG\.venv\Lib\site-packages\httpx\_client.py[line:1025] - INFO: HTTP Request: POST https://ark.cn-beijing.volces.com/api/v3/chat/completions "HTTP/1.1 200 OK"
