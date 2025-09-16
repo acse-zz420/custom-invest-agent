@@ -51,8 +51,6 @@ def process_all_md_files(
         chunk_prompt: str,
         embedding_model_path: str,
         collection_name: str = "financial_reports",
-        host: str = "localhost",
-        port: str = "19530",
         api_key: str = None
 ):
     """
@@ -136,9 +134,10 @@ def process_all_md_files(
 
 
     # 初始化 Milvus 向量存储
-    print(f"正在连接到 Milvus: http://{host}:{port}")
+    print(f"正在连接到 Milvus")
     vector_store = MilvusVectorStore(
-        uri=f"http://{host}:{port}",
+        uri=ZILLIZ_URI,
+        token=ZILLIZ_TOKEN,
         collection_name=collection_name,
         dim=embedding_dim,
         overwrite=True,
