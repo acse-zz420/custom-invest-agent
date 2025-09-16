@@ -16,7 +16,8 @@ from config import *
 from tool import timer
 from prompt import CYPHER_PROMPT
 
-from IPython.display import display, Markdown
+Settings.llm = VolcengineLLM(api_key=API_KEY)
+_, _, Settings.embed_model = get_embedding_model()
 
 
 class HybridGraphRetriever(CustomPGRetriever):
@@ -397,9 +398,9 @@ class HybridGraphRetriever(CustomPGRetriever):
 @timer
 def load_existing_graph_index():
     """从现有的 Neo4j 数据库中加载 PropertyGraphIndex。"""
-    print("正在配置 LLM 和嵌入模型...")
-    Settings.llm = VolcengineLLM(api_key=API_KEY)
-    _, _, Settings.embed_model = get_embedding_model()
+    # print("正在配置 LLM 和嵌入模型...")
+    # Settings.llm = VolcengineLLM(api_key=API_KEY)
+    # _, _, Settings.embed_model = get_embedding_model()
 
     print("正在连接到 Neo4j 并加载现有图谱索引...")
     graph_store = Neo4jPropertyGraphStore(
@@ -447,8 +448,6 @@ def run_queries(index: PropertyGraphIndex):
     # 执行自定义查询
     print("\n" + "-" * 25 + " 执行自定义混合查询 " + "-" * 25)
     custom_response = custom_query_engine.query(query)
-    print("\n展开上下文:")
-    display(Markdown(f"<b>{custom_response}</b>"))
     print("\n[结果] 自定义混合查询的最终答案:")
     print(custom_response.response)
 

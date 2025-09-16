@@ -4,11 +4,11 @@ from llama_index.core import PropertyGraphIndex
 from llama_index.graph_stores.neo4j import Neo4jPropertyGraphStore
 from llama_index.core.response_synthesizers import get_response_synthesizer, ResponseMode
 from llama_index.core.query_engine import RetrieverQueryEngine
-from llama_index.core.settings import Settings
+# from llama_index.core.settings import Settings
 from llama_index.core.tools import FunctionTool
 
 from graph.graph_query import HybridGraphRetriever
-from rag_milvus.rag_pipeline_raw import get_sentence_embedding,get_reranker_model,retrieve_and_rerank_pipeline_test
+from rag_milvus.rag_pipeline_raw import get_sentence_embedding, get_reranker_model, retrieve_and_rerank_pipeline_test
 from prompt import CUSTOM_QA_TEMPLATE, CUSTOM_REFINE_TEMPLATE
 from llm_ali import QwenToolLLM
 from config import *
@@ -29,7 +29,7 @@ def custom_graph_search(query: str) -> List[NodeWithScore]:
         url=NEO4J_URI,
         database=NEO4J_DATABASE
     )
-    index = PropertyGraphIndex.from_existing(property_graph_store=graph_store)
+    index = PropertyGraphIndex.from_existing(property_graph_store=graph_store, llm=llm)
 
     # b. 构建您的自定义混合检索器
     hybrid_retriever = HybridGraphRetriever(
@@ -54,7 +54,7 @@ async def custom_milvus_search(query: str) -> List[NodeWithScore]:
 
     filter_fields = [
         "institution",
-        "report_type",
+        # "report_type",
         "authors",
         # "date_range"
     ]

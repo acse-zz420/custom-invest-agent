@@ -1,5 +1,5 @@
 import json
-from typing import Tuple, List
+from typing import Tuple, List  #, get_args
 from pathlib import Path
 import logging
 from llama_index.core import (
@@ -9,7 +9,6 @@ from llama_index.core import (
 )
 from tool import timer
 from llama_index.graph_stores.neo4j import Neo4jPropertyGraphStore
-from llama_index.core.indices.property_graph import SimpleLLMPathExtractor
 from llama_index.core.indices.property_graph import SchemaLLMPathExtractor
 from llm import VolcengineLLM
 from prompt import EXTRACTOR_PROMPT, FINANCE_ENTITIES, FINANCE_RELATIONS, FINANCE_VALIDATION_SCHEMA
@@ -17,8 +16,6 @@ from config import get_embedding_model
 from config import API_KEY, NEO4J_USERNAME, NEO4J_PASSWORD, NEO4J_URI, NEO4J_DATABASE, MD_TEST_DIR
 from hybrid_chunking import custom_chunk_pipeline
 
-# 配置日志
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 @timer
 def setup_llm_and_embed_model():
@@ -266,13 +263,14 @@ def build_property_graph():
         kg_extractor = SchemaLLMPathExtractor(
             llm=llm,
             possible_entities=FINANCE_ENTITIES,
-            # possible_relations=FINANCE_RELATIONS,
-            # kg_validation_schema=FINANCE_VALIDATION_SCHEMA,
-            strict=False,  # if false, will allow triplets outside of the schema
+            possible_relations=FINANCE_RELATIONS,
+            kg_validation_schema=FINANCE_VALIDATION_SCHEMA,
+            strict=True,  # if false, will allow triplets outside of the schema
             extract_prompt=EXTRACTOR_PROMPT,
             num_workers=4,
             max_triplets_per_chunk=3,
         )
+
 
         logging.info("开始构建 PropertyGraphIndex...")
         index = PropertyGraphIndex(
@@ -294,7 +292,7 @@ def build_property_graph():
         # if use_leiden:
         #     run_leiden_community_detection(graph_store)
         # else:
-        #     logging.info("Leiden 社区发现算法未启用，跳过执行。")
+        #     print("Leiden 社区发现算法未启用，跳过执行。")
     except Exception as e:
         logging.error(f"构建属性图谱过程中发生严重错误: {e}", exc_info=True)
     finally:
@@ -311,7 +309,7 @@ def build_graph_community(use_leiden: bool = True):
     if use_leiden:
         run_leiden_community_detection(graph_store)
     else:
-        logging.info("Leiden 社区发现算法未启用，跳过执行。")
+        print("Leiden 社区发现算法未启用，跳过执行。")
 
 
 if __name__ == "__main__":

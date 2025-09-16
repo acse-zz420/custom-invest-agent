@@ -7,8 +7,8 @@ import logging
 
 # MD_DIR = r"D:\yechuan\work\cjsx\RAG\report"
 # MD_TEST_DIR = r"D:\yechuan\work\cjsx\Docker_milvus\milvus\report_test"
-MD_DIR = r"E:\financial_reports"
-MD_TEST_DIR = r"E:\financial_reports2"
+MD_DIR = r"E:\financial_reports"  # Milvus
+MD_TEST_DIR = r"E:\financial_reports2"  # Neo4j
 
 TOOL_CALL_MODEL = "ep-20250826172947-ntwcf"
 CHAT_MODEL = "ep-20250422130700-hfw6r"
