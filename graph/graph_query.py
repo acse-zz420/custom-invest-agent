@@ -13,7 +13,7 @@ from llama_index.core.schema import NodeWithScore, TextNode
 
 from llm import VolcengineLLM
 from config import *
-from tool import timer
+from timer_tool import timer
 from prompt import CYPHER_PROMPT
 
 Settings.llm = VolcengineLLM(api_key=API_KEY)

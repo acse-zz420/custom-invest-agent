@@ -13,7 +13,7 @@ from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.vector_stores.milvus import MilvusVectorStore
 from pymilvus import Collection, connections, utility
 from transformers import AutoConfig
-from tool import  timer
+from timer_tool import  timer
 from prompt import chunk_extract_prompt_new
 
 # --- 全局配置 (请根据你的环境修改) ---

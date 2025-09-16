@@ -7,7 +7,7 @@ from llama_index.core import (
     Settings,
     Document,
 )
-from tool import timer
+from timer_tool import timer
 from llama_index.graph_stores.neo4j import Neo4jPropertyGraphStore
 from llama_index.core.indices.property_graph import SchemaLLMPathExtractor
 from llm import VolcengineLLM
