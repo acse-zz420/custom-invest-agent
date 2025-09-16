@@ -10,7 +10,7 @@ from llama_index.core.workflow import (
 from llama_index.core.agent.workflow import AgentWorkflow
 from pyexpat.errors import messages
 
-from .tools.calculator import *
+from .tools.financial_calculator import *
 from .tools.rag_tools import *
 from llama_index.core.llms import ChatMessage
 
