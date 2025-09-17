@@ -1,28 +1,25 @@
 import json
 import asyncio
-import time
-import pandas as pd
 import phoenix as px
 from typing import Dict, List, Optional, Literal, Any
 from llama_index.core import PropertyGraphIndex
 from llama_index.graph_stores.neo4j import Neo4jPropertyGraphStore
+
 from watchfiles import awatch
+
 from graph.graph_query import HybridGraphRetriever
-from opentelemetry import trace
-from phoenix.client import Client
-from opentelemetry.trace import Status, StatusCode
 from llm_ali import QwenToolLLM
 from rag_milvus.query_split import parse_query_to_json
 from rag_milvus.milvus_filter import query_milvus, bm25_enhanced_search,get_sentence_embedding
 from reranker import rerank_results, rerank_nodes
 from config import *
 from llama_index.core.schema import NodeWithScore, TextNode
-from llama_index.core.settings import Settings
 from opentelemetry.trace import Tracer
-from tracing import *
+from phoenix.client import Client
+from opentelemetry.trace import Status, StatusCode
+from rag_milvus.tracing import *
 
-_, _, Settings.embed_model = get_embedding_model()
-
+_, _, embed_model = get_embedding_model()
 
 
 
@@ -252,154 +249,37 @@ def retrieve_from_graph(
     return results
 
 
-def execute_rag_pipeline(
-        query: str,
-        llm: object,  # LLM 客户端实例
-        collection_name: str,
-        embedding_model_path: str,  # 嵌入模型路径
-        graph_index: Optional[PropertyGraphIndex]=None,
-        search_strategy: Literal["normal", "bm25_enhanced", "graph_enhanced"] = "normal",  # 选择检索策略
-        filter_fields: Optional[List[str]] = None,
-        top_k_retrieval: int = 50,  # 初始检索数量
-        top_k_llm: int = 5,  # 交给LLM的数量
-        search_threshold: float = 0.5,  # 语义搜索阈值
-        use_reranker: bool = True,  # 是否启用重排器
-        dense_embedding_function: Optional[object] = None,
-        reranker_model_function: Optional[object] = None
-):
-    """
-    执行一个完整的、可配置的 RAG（检索增强生成）流程。
-
-    Args:
-        query (str): 用户的原始查询。
-        llm (object): LLM 客户端实例。
-        collection_name (str): Milvus 集合名称。
-        embedding_model_path (str): 密集嵌入模型的路径 (用于 query_milvus)。
-        graph_index: PropertyGraphIndex的图索引
-        search_strategy (Literal["normal", "bm25_enhanced"]):
-            - "normal": 使用纯语义搜索结合元数据过滤 (调用 query_milvus)。
-            - "bm25_enhanced": 使用语义+关键词混合搜索结合元数据过滤 (调用 bm25_enhanced_search)。
-            - "graph_enhanced": 使用bm25_enhanced+graph并行检索
-        filter_fields (Optional[List[str]]): 用于从查询中提取的元数据字段列表。
-        top_k_retrieval (int): 初始检索返回的结果数量。
-        top_k_rerank (int): 重排后保留的结果数量。
-        top_k_llm (int): 最终交给 LLM 用于生成答案的上下文数量。
-        search_threshold (float): 语义搜索的相似度阈值。
-        use_reranker (bool): 是否启用 Reranker 进行结果重排。
-        dense_embedding_function (Optional[object]): 混合搜索所需的密集编码器实例。
-
-    Returns:
-        str: LLM 生成的最终答案。
-    """
-    with tracer.start_as_current_span("execute_rag_pipeline") as root_span:
-        root_span.set_attribute("input.query", query)
-        root_span.set_attribute("input.search_strategy", search_strategy)
-        with tracer.start_as_current_span("Phase 1: Parse Query") as parse_phase_span:
-            print(f"--- 阶段 1: 解析查询 ---")
-            if filter_fields:
-                # 步骤 1.1: LLM 解析
-                with tracer.start_as_current_span("LLM Parse for Filters") as llm_parse_span:
-                    parse_result_json = parse_query_to_json(query, llm)
-                    parsed_result = parse_result_json.get("parsed_result", {})
-                    llm_parse_span.set_attribute("output.parsed_result", json.dumps(parsed_result, ensure_ascii=False))
-
-                # 步骤 1.2: 构建筛选器
-                with tracer.start_as_current_span("Build Filters from Parsed Result") as build_filter_span:
-                    filters = build_complex_filters(parsed_result, filter_fields)
-                    build_filter_span.set_attribute("output.filters", json.dumps(filters, ensure_ascii=False))
-            else:
-                filters = ""
-            print(f"生成的Milvus筛选器: {filters}")
-
-        with tracer.start_as_current_span("Phase 2: Retrieve") as retrieve_span:
-            # --- 2. 根据策略选择并执行检索 ---
-            print(f"\n--- 阶段 2: 执行检索 (策略: {search_strategy}) ---")
-            all_retrieved_results = []
-            with tracer.start_as_current_span("Initial Retrieval") as initial_retrieval_span:
-                # -- 路径 1: Milvus 检索 (语义或混合) --
-                if search_strategy in ["normal", "bm25_enhanced", "graph_enhanced"]:
-                    print("  执行 Milvus 检索...")
-                    milvus_results = []
-                    if search_strategy == "normal" or search_strategy == "graph_enhanced":
-                        milvus_results = query_milvus(
-                            collection_name=collection_name, filters=filters, query_text=query,
-                            embedding_model_path=embedding_model_path, top_k=top_k_retrieval,
-                            search_threshold=search_threshold
-                        )
-                    elif search_strategy == "bm25_enhanced":
-                        milvus_results = bm25_enhanced_search(
-                            collection_name=collection_name, query_text=query,
-                            embedding_model_path=embedding_model_path, filters=filters,
-                            top_k=top_k_retrieval, dense_embedding_function=dense_embedding_function
-                        )
-                    # 为Milvus结果添加来源标识
-                    for res in milvus_results:
-                        res['source_type'] = 'milvus'
-                    all_retrieved_results.extend(milvus_results)
-                    print(f"  Milvus 检索到 {len(milvus_results)} 条结果。")
-
-                    # -- 路径 2: 知识图谱检索 --
-                    if search_strategy == "graph_enhanced" and graph_index:
-                        graph_results = retrieve_from_graph(query, graph_index)
-                        all_retrieved_results.extend(graph_results)
-
-                    # -- 结果去重 --
-                    # 根据文本内容进行去重，避免完全相同的内容被多次处理
-                    unique_results = {}
-                    for res in all_retrieved_results:
-                        text_content = res.get("text", "").strip()
-                        if text_content and text_content not in unique_results:
-                            unique_results[text_content] = res
-                    final_initial_results = list(unique_results.values())
-                    print(f"\n初步检索并去重后，共获得 {len(final_initial_results)} 条候选结果。")
-                    retrieve_span.set_attribute("output.unique_results_count", len(final_initial_results))
-
-            # --- 3. 结果重排 ---
-            final_retrieved_docs = []
-            if use_reranker and final_initial_results and "message" not in final_initial_results[0]:
-                with tracer.start_as_current_span("Phase 3: Rerank") as rerank_span:
-                    print(f"\n--- 阶段 3: 对混合结果执行重排 ---")
-                    reranker_model, reranker_tokenizer = reranker_model_function
-                    final_retrieved_docs = rerank_results(
-                        results=final_initial_results,
-                        query=query,
-                        model=reranker_model,
-                        tokenizer=reranker_tokenizer
-                    )
-                    rerank_span.set_attribute("output.reranked_docs_count", len(final_retrieved_docs))
-                    print(f"重排后保留 {len(final_retrieved_docs)} 条结果。")
-            else:
-
-                final_retrieved_docs = final_initial_results[:top_k_llm * 2]  # 留多一点给LLM选择
-
-            # --- 4. LLM 生成最终答案 ---
-        with tracer.start_as_current_span("Phase 4: Generate Final Answer") as generation_span:
-            print(f"\n--- 阶段 4: 生成最终答案 ---")
-            final_answer = generate_llm_answer(
-                query=query,
-                retrieved_results=final_retrieved_docs,
-                llm=llm,
-                max_results=top_k_llm
-            )
-            root_span.set_attribute("output.final_answer", final_answer)
-            return final_retrieved_docs, final_answer
-
-
 def _milvus_result_to_nodes(milvus_results: List[Dict]) -> List[NodeWithScore]:
-    """将 Milvus 的原始字典结果转换为 NodeWithScore 对象列表"""
+    """
+    将 Milvus 的原始字典结果，精准地转换为 NodeWithScore 对象列表。
+    只包含 text, id_, 和包含 file_name 的 metadata。
+    """
     nodes = []
     for res in milvus_results:
-        # 创建一个 TextNode 对象
+        # --- 1. 从 res 字典中提取所有需要的信息 ---
+
+        text_content = res.get("text", "")
+        node_id = res.get("doc_id", f"milvus_{res.get('id', '')}")
+
+        # 将两个分数中较高的一个作为最终分数，或者自定义融合逻辑
+        score = max(res.get("semantic_score", 0.0), res.get("bm25_score", 0.0))
+
+        # 从 res 字典中直接获取 file_name
+        file_name = res.get("file_name", "Unknown Milvus File")
+
+        # --- 2. 创建一个 TextNode ---
         node = TextNode(
-            text=res.get("text", ""),
-            doc_id=res.get("doc_id",""),
-            # 将所有 Milvus 的元数据（包括 file_id）都放入 metadata
+            text=text_content,
+            id_=node_id,
             metadata={
-                "source_type": "milvus",  # 添加来源标识
-                **res.get("metadata", {})  # 将其他元数据也加进去
+                "source_type": "milvus",
+                "file_name": file_name,
             }
         )
-        nodes.append(NodeWithScore(node=node, score=res.get("similarity_score")))
+
+        # 3. 创建 NodeWithScore
+        nodes.append(NodeWithScore(node=node, score=score))
+
     return nodes
 
 
@@ -415,28 +295,27 @@ def _graph_result_to_nodes(graph_results: List[Dict]) -> List[NodeWithScore]:
             }
         )
         nodes.append(NodeWithScore(node=node, score=res.get("similarity_score")))
-    return nodes
 
+    return nodes
 
 
 async def retrieve_and_rerank_pipeline(
         query: str,
-        llm: object,  # LLM 客户端实例
+        llm: object,
         collection_name: str,
         embedding_model_path: str,
         graph_index: Optional[PropertyGraphIndex] = None,
-        search_strategy: str = "graph_enhanced",
+        search_strategy: str = "bm25_enhanced",
         filter_fields: Optional[List[str]] = None,
         top_k_retrieval: int = 10,
-        top_k_rerank: int = 5,  # 重排后保留的数量
-        search_threshold: float = 0.5,  # 语义搜索阈值
-        use_reranker: bool = True,  # 是否启用重排器
+        top_k_rerank: int = 5,
+        search_threshold: float = 0.5,
+        use_reranker: bool = True,
         dense_embedding_function: Optional[object] = None,
         reranker_model_function: Optional[object] = None
 ) -> List[NodeWithScore]:
     """
-    一个只负责“检索”和“重排”的新 pipeline。
-    它的最终输出是一个经过排序和筛选的 NodeWithScore 对象列表。
+    一个只负责“检索”和“重排”的新 pipeline (无 Tracing)。
     """
     with tracer.start_as_current_span("retrieve_and_rerank_pipeline") as root_span:
         root_span.set_attribute("input.query", query)
@@ -565,7 +444,7 @@ async def main():
         )
         graph_index = PropertyGraphIndex.from_existing(
             property_graph_store=graph_store,
-            embed_model=Settings.embed_model
+            embed_model=embed_model
         )
         print("知识图谱索引初始化成功。")
     except Exception as e:

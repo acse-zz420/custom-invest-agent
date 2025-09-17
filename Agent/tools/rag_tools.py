@@ -8,11 +8,14 @@ from llama_index.core.settings import Settings
 from llama_index.core.tools import FunctionTool
 
 from graph.graph_query import HybridGraphRetriever
-from rag_milvus.rag_pipeline_raw import get_sentence_embedding,get_reranker_model,retrieve_and_rerank_pipeline_test
+from rag_milvus.rag_pipeline import get_sentence_embedding, retrieve_and_rerank_pipeline
 from prompt import CUSTOM_QA_TEMPLATE, CUSTOM_REFINE_TEMPLATE
 from llm_ali import QwenToolLLM
 from config import *
+from rag_milvus.tracing import tracer
 from llama_index.core.schema import NodeWithScore, TextNode
+
+
 
 llm = QwenToolLLM()
 def custom_graph_search(query: str) -> List[NodeWithScore]:
@@ -35,6 +38,8 @@ def custom_graph_search(query: str) -> List[NodeWithScore]:
     hybrid_retriever = HybridGraphRetriever(
         graph_store=index.property_graph_store,
         index=index,
+        tracer=tracer,
+        llm=llm,
         similarity_top_k=10,
         community_expansion=True,
     )
@@ -59,7 +64,7 @@ async def custom_milvus_search(query: str) -> List[NodeWithScore]:
         # "date_range"
     ]
 
-    retrieved_nodes = await retrieve_and_rerank_pipeline_test(
+    retrieved_nodes = await retrieve_and_rerank_pipeline(
         query=query,
         llm=llm,
         collection_name="financial_reports",

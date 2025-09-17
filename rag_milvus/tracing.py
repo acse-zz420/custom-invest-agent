@@ -1,8 +1,6 @@
-# OpenTelemetry and Phoenix
 from phoenix.otel import register
 from opentelemetry import trace
-from opentelemetry.trace import Status, StatusCode
-from phoenix.client import Client
+
 
 print("--- Checking for OpenTelemetry Environment Variables ---")
 
@@ -10,6 +8,7 @@ collector_endpoint = "http://localhost:6006/v1/traces"
 
 tracer_provider = register(
     endpoint=collector_endpoint,
+    protocol="http/protobuf",
     project_name="Custom_Rag_Pipeline",
     batch=True,
     auto_instrument=True

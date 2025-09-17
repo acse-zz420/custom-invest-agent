@@ -16,15 +16,18 @@ from llama_index.core.llms import ChatMessage
 
 from Agent.agent_prompts import *
 from Agent.events import *
+from opentelemetry import trace
+from opentelemetry.trace import Tracer
 from llama_index.utils.workflow import draw_all_possible_flows
 
 class FinancialWorkflow(Workflow):
-    def __init__(self, llm: LLM, agents: Dict[str, AgentWorkflow], verbose: bool = False, max_loops:int=2):
+    def __init__(self, llm: LLM, agents: Dict[str, AgentWorkflow], tracer: Tracer, verbose: bool = False, max_loops:int=2):
         super().__init__(
             timeout=600.0,
             verbose=verbose,
         )
 
+        self.tracer = tracer
         self.llm = llm
         self.agents = agents
         self.verbose = verbose
@@ -53,19 +56,28 @@ class FinancialWorkflow(Workflow):
 
     async def _execute_tool_calling_step(self, tool_category: str, user_input: str) -> str:
         """一个通用的、执行 Tool Calling 的辅助函数"""
-        target_tools = self.tools[tool_category]
-        if self.verbose: print(f"--- [{tool_category}]: 接收到任务 '{user_input}' ---")
+        with self.tracer.start_as_current_span(
+                f"execute_{tool_category.lower()}_tool_call"
+        ) as span:
+            span.set_attribute("tool_category", tool_category)
+            span.set_attribute("user_input", user_input)
 
-        # 阶段 1: 模型决策
-        response = await self.llm.achat(
-            messages=[ChatMessage(role="user", content=user_input)],
-            tools=target_tools,
-            tool_choice="auto",
-        )
+            target_tools = self.tools[tool_category]
+            if self.verbose: print(f"--- [{tool_category}]: 接收到任务 '{user_input}' ---")
 
-        tool_calls = response.message.additional_kwargs.get("tool_calls")
+            # 阶段 1: 模型决策
+            response = await self.llm.achat(
+                messages=[ChatMessage(role="user", content=user_input)],
+                tools=target_tools,
+                tool_choice="auto",
+            )
+
+            tool_calls = response.message.additional_kwargs.get("tool_calls")
+            span.set_attribute("llm.decision.has_tool_calls", bool(tool_calls))
+
 
         if not tool_calls:
+            span.set_attribute("llm.response_text", response.message.content)
             if self.verbose: print(f"--- [{tool_category}]: LLM 决定不调用工具，直接回答。---")
             return response.message.content
 
@@ -74,38 +86,49 @@ class FinancialWorkflow(Workflow):
         tool_outputs = []
         for call in tool_calls:
             tool_name = call.get("function", {}).get("name")
-            arguments_str = call.get("function", {}).get("arguments")
+            with self.tracer.start_as_current_span(f"tool_execution_{tool_name}") as tool_span:
+                arguments_str = call.get("function", {}).get("arguments")
 
-            if not tool_name or arguments_str is None:
-                tool_outputs.append({"output": f"错误: LLM 返回的 tool_call 格式不完整: {call}"})
-                continue
-            arguments = json.loads(arguments_str)
+                if not tool_name or arguments_str is None:
+                    tool_outputs.append({"output": f"错误: LLM 返回的 tool_call 格式不完整: {call}"})
+                    continue
+                arguments = json.loads(arguments_str)
+                tool_span.set_attribute("tool.name", tool_name)
+                tool_span.set_attribute("tool.arguments", json.dumps(arguments, ensure_ascii=False))
 
-            target_tool = next((t for t in target_tools if t.metadata.name == tool_name), None)
-            if not target_tool:
-                tool_outputs.append({"output": f"错误: 找不到名为 '{tool_name}' 的工具对象"})
-                continue
+                target_tool = next((t for t in target_tools if t.metadata.name == tool_name), None)
+                if not target_tool:
+                    tool_outputs.append({"output": f"错误: 找不到名为 '{tool_name}' 的工具对象"})
+                    continue
 
-            target_tool_fn = target_tool.fn
+                target_tool_fn = target_tool.fn
 
-            #   我们现在要判断 target_tool_fn 是同步还是异步
-            if asyncio.iscoroutinefunction(target_tool_fn):
-                # 如果是异步函数 (async def)，就直接 await
-                if self.verbose: print(f"      - (Async) 执行函数: {tool_name}(**{arguments})")
-                tool_result = await target_tool_fn(**arguments)
-            else:
-                # 如果是同步函数 (def)，就用 asyncio.to_thread 在独立线程中运行
-                if self.verbose: print(f"      - (Sync via Thread) 执行函数: {tool_name}(**{arguments})")
-                tool_result = await asyncio.to_thread(target_tool_fn, **arguments)
+                #   我们现在要判断 target_tool_fn 是同步还是异步
+                if asyncio.iscoroutinefunction(target_tool_fn):
+                    # 如果是异步函数 (async def)，就直接 await
+                    if self.verbose: print(f"      - (Async) 执行函数: {tool_name}(**{arguments})")
+                    tool_result = await target_tool_fn(**arguments)
+                else:
+                    # 如果是同步函数 (def)，就用 asyncio.to_thread 在独立线程中运行
+                    if self.verbose: print(f"      - (Sync via Thread) 执行函数: {tool_name}(**{arguments})")
+                    tool_result = await asyncio.to_thread(target_tool_fn, **arguments)
 
-            tool_outputs.append({"tool_name": tool_name, "output": str(tool_result)})
+                tool_outputs.append({"tool_name": tool_name, "output": str(tool_result)})
 
 
         final_result = "\n".join([f"{r['tool_name']} 返回: {r['output']}" for r in tool_outputs])
+        span.set_attribute("output.final_result", final_result)
         return final_result
     # 步骤 1: 规划 (Plan)
     @step
     async def dispatcher_step(self, ev: UserInputEvent) -> CalculatorTriggerEvent | RAGTriggerEvent | SimpleChatTriggerEvent:
+
+        span = trace.get_current_span()
+        span.set_attribute("user_msg", ev.user_msg)
+        if ev.previous_attempt:
+            span.set_attribute("previous_attempt", ev.previous_attempt)
+            span.set_attribute("critique_feedback", ev.critique_feedback)
+
         if self.verbose: print(f"--- [Dispatcher]: 分析请求 '{ev.user_msg}'... ---")
         prev_attempt_str = ev.previous_attempt if ev.previous_attempt else "无"
         critique_str = ev.critique_feedback if ev.critique_feedback else "无"
@@ -128,20 +151,33 @@ class FinancialWorkflow(Workflow):
                 return RAGTriggerEvent(user_msg=ev.user_msg, query=ev.user_msg)
             else:
                 return SimpleChatTriggerEvent(user_msg=ev.user_msg)
+
+
         except Exception as e:
             if self.verbose: print(f"--- [Dispatcher]: 决策解析失败 ({e})，转为简单聊天。 ---")
-            return SimpleChatTriggerEvent(user_msg=ev.user_msg)
+
+        span.set_attribute("decision.task_type", decision.get("task_type"))
+        span.set_attribute("decision.query", decision.get("query"))
+        return SimpleChatTriggerEvent(user_msg=ev.user_msg)
 
     # --- 路线 A: 简单聊天 ---
     @step
     async def simple_chat_step(self, ev: SimpleChatTriggerEvent) -> FinalOutputEvent:
+        span = trace.get_current_span()
+        span.set_attribute("user_msg", ev.user_msg)
+
         if self.verbose: print(f"--- [SimpleChat]: 直接回答... ---")
         response = await self.llm.achat([ChatMessage(role="user", content=ev.user_msg)])
+        span.set_attribute("final_response", response.message.content)
         return FinalOutputEvent(response=response.message.content)
 
     # --- 路线 B: 金融因子计算 ---
     @step
     async def calculator_step(self, ev: CalculatorTriggerEvent) -> CritiqueEvent:
+        span = trace.get_current_span()
+        span.set_attribute("user_msg", ev.user_msg)
+        span.set_attribute("calculator_query", ev.query)
+
         if self.verbose: print(f"--- [Calculator]: 开始执行计算任务... ---")
 
         tool_result = await self._execute_tool_calling_step(
@@ -150,6 +186,7 @@ class FinancialWorkflow(Workflow):
         )
 
         # 直接将工具执行结果作为最终答案
+        span.set_attribute("tool_result", tool_result)
         return CritiqueEvent(user_msg=ev.user_msg, final_context="", preliminary_answer=tool_result,
                              current_loop=ev.current_loop)
 
@@ -158,15 +195,29 @@ class FinancialWorkflow(Workflow):
     # 步骤 B.1: 并行检索 (Fan-Out)
     @step
     async def milvus_retrieval_step(self, ev: RAGTriggerEvent) -> SearchResultEvent:
+        span = trace.get_current_span()
+        span.set_attribute("user_msg", ev.user_msg)
+        span.set_attribute("query", ev.query)
+        span.set_attribute("current_loop", ev.current_loop)
+
         if self.verbose: print(f"--- [Milvus]: (循环 {ev.current_loop}) 开始并行检索... ---")
         nodes = await custom_milvus_search(ev.query)
+
+        span.set_attribute("retrieved_nodes_count", len(nodes))
         return SearchResultEvent(source="milvus", results=nodes, user_msg=ev.user_msg, query=ev.query,
                                  current_loop=ev.current_loop)
 
     @step
     async def graph_retrieval_step(self, ev: RAGTriggerEvent) -> SearchResultEvent:
+        span = trace.get_current_span()
+        span.set_attribute("user_msg", ev.user_msg)
+        span.set_attribute("query", ev.query)
+        span.set_attribute("current_loop", ev.current_loop)
+
         if self.verbose: print(f"--- [Graph]: (循环 {ev.current_loop}) 开始并行查询... ---")
         nodes = await asyncio.to_thread(custom_graph_search, ev.query)
+
+        span.set_attribute("retrieved_nodes_count", len(nodes))
         return SearchResultEvent(source="graph", results=nodes, user_msg=ev.user_msg, query=ev.query,
                                  current_loop=ev.current_loop)
 
@@ -177,6 +228,8 @@ class FinancialWorkflow(Workflow):
         search_results: List[SearchResultEvent] | None = ctx.collect_events(
             ev, expected=[SearchResultEvent, SearchResultEvent]
         )
+        span = trace.get_current_span()
+
         if search_results is None:
             # 如果还没有收集齐（比如只有一个分支完成了），
             # 就返回 None，工作流会暂停此步骤并等待下一个事件
@@ -196,6 +249,8 @@ class FinancialWorkflow(Workflow):
             [f"来源: {n.node.metadata.get('file_name', 'N/A')}\n内容: {n.node.get_content()}" for n in final_nodes])
         ref_event = search_results[0]
 
+        span.set_attribute("unique_nodes_count", len(final_nodes))
+        span.set_attribute("fused_context_length", len(fused_context))
         return SummarizationEvent(
             user_msg=ref_event.user_msg,
             final_context=fused_context,
@@ -207,16 +262,27 @@ class FinancialWorkflow(Workflow):
     # 步骤 B.5: 生成最终答案
     @step
     async def summarizer_step(self, ev: SummarizationEvent) -> CritiqueEvent:
+        span = trace.get_current_span()
+        span.set_attribute("user_msg", ev.user_msg)
+        span.set_attribute("final_context_length", len(ev.final_context))
+
         if self.verbose: print(f"---  [Summarizer]: 生成草稿回答... ---")
         prompt = SUMMARIZER_PROMPT.format(context=ev.final_context, user_msg=ev.user_msg)
         response = await self.llm.achat([ChatMessage(role="user", content=prompt)])
         draft_answer = response.message.content
+
+        span.set_attribute("draft_answer", draft_answer)
         return CritiqueEvent(user_msg=ev.user_msg, final_context=ev.final_context, preliminary_answer=draft_answer,
                              current_loop=ev.current_loop)
 
     # 步骤 B.6: 质量评估与循环
     @step
     async def quality_check_step(self, ev: CritiqueEvent) -> UserInputEvent | FinalOutputEvent:
+        span = trace.get_current_span()
+        span.set_attribute("user_msg", ev.user_msg)
+        span.set_attribute("draft_answer_to_critique", ev.preliminary_answer)
+        span.set_attribute("current_loop", ev.current_loop)
+
         if self.verbose: print(f"--- [Critique]: 评估草稿回答... ---")
         prompt = CRITIQUE_PROMPT.format(user_msg=ev.user_msg, draft_answer=ev.preliminary_answer)
         response = await self.llm.achat([ChatMessage(role="user", content=prompt)])
@@ -236,14 +302,21 @@ class FinancialWorkflow(Workflow):
                 f"我已经尽力了，但目前的答案可能仍不完美。\n"
                 f"这是我目前能给出的最好结果：\n\n{ev.preliminary_answer}"
             )
+
+            span.set_attribute("critique.is_sufficient", critique.get("is_sufficient"))
+            span.set_attribute("critique.reason", critique.get("reason"))
+            span.set_attribute("critique.missing_info", critique.get("missing_information"))
             return FinalOutputEvent(response=final_answer)
 
         if critique.get("is_sufficient") or current_loop >= self.max_loops:
             if not critique.get("is_sufficient"):
                 print(f"---  [Critique]: 已达到最大循环次数 ({self.max_loops})，强制结束。---")
             if self.verbose: print(f"--- [Critique]: 回答令人满意。工作流结束。 ---")
+
+            span.set_attribute("final_decision", "Stop Workflow")
             return FinalOutputEvent(response=ev.preliminary_answer)
         else:
+            span.set_attribute("final_decision", "Stop Workflow")
             if self.verbose: print(f"--- [Critique]: 回答不理想。将基于修正建议重新开始检索... ---")
             new_query = f"原始问题: {ev.user_msg}\n修正建议: {critique.get('missing_information')}"
             return UserInputEvent(user_msg=ev.user_msg, query=new_query, previous_attempt=ev.preliminary_answer,

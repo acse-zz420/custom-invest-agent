@@ -1,5 +1,5 @@
 import json
-from typing import Any, List, Optional, AsyncGenerator
+from typing import Any, List, Dict
 
 from openai import OpenAI, AsyncOpenAI
 from pydantic import PrivateAttr, SecretStr, Field
@@ -60,6 +60,26 @@ class QwenToolLLM(CustomLLM):
             is_chat_model=True,
             is_function_calling_model=True,
         )
+
+    def _print_payload(self, context_str: str, messages: List, api_kwargs: Dict):
+        if not self.verbose: return
+        payload = {"model": self.model, "messages": messages, **api_kwargs}
+        print("\n" + "=" * 20 + f" [{context_str}: Final OpenAI Payload] " + "=" * 20)
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        print("=" * (42 + len(context_str) + 21) + "\n")
+
+    def _convert_messages_to_openai_format(self, messages: List[ChatMessage]) -> List[Dict]:
+        openai_messages = []
+        for msg in messages:
+            openai_msg = {"role": msg.role.value, "content": msg.content or ""}
+            if msg.additional_kwargs:
+                if "tool_calls" in msg.additional_kwargs:
+                    openai_msg["content"] = None
+                    openai_msg["tool_calls"] = msg.additional_kwargs["tool_calls"]
+                if msg.role == MessageRole.TOOL and "tool_call_id" in msg.additional_kwargs:
+                    openai_msg["tool_call_id"] = msg.additional_kwargs["tool_call_id"]
+            openai_messages.append(openai_msg)
+        return openai_messages
 
     def complete(self, prompt: str, system_prompt: str = None, **kwargs) -> CompletionResponse:
         temperature = kwargs.get("temperature", self.temperature)

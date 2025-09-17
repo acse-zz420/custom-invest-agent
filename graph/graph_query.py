@@ -1,7 +1,7 @@
 import re, ast
 from typing import List
 
-from llama_index.core import PropertyGraphIndex, Settings
+from llama_index.core import PropertyGraphIndex
 from llama_index.graph_stores.neo4j import Neo4jPropertyGraphStore
 from llama_index.core.retrievers import (
     CustomPGRetriever,
@@ -15,11 +15,13 @@ from llm import VolcengineLLM
 from config import *
 from timer_tool import timer
 from prompt import CYPHER_PROMPT
+from opentelemetry.trace import Tracer
+from llama_index.core.llms.llm import LLM
+from rag_milvus.tracing import *
+from opentelemetry.trace import Status, StatusCode
 
-from IPython.display import display, Markdown
-
-Settings.llm = VolcengineLLM(api_key=API_KEY)
-_, _, Settings.embed_model = get_embedding_model()
+llm = VolcengineLLM(api_key=API_KEY)
+_, _, embed_model = get_embedding_model()
 
 class HybridGraphRetriever(CustomPGRetriever):
     """
@@ -29,6 +31,8 @@ class HybridGraphRetriever(CustomPGRetriever):
     def init(
             self,
             index: PropertyGraphIndex,
+            tracer: Tracer,
+            llm: LLM,
             similarity_top_k: int = 4,
             path_depth: int = 1,
             community_expansion: bool = False,
@@ -43,11 +47,14 @@ class HybridGraphRetriever(CustomPGRetriever):
             path_depth (int): 从向量检索到的节点出发，在图中探索的深度。
             community_expansion: 使用Leiden算法
         """
+        self._tracer = tracer
+        self._llm = llm
         self._community_expansion = community_expansion
         # 初始化向量上下文检索器
         self._vector_retriever = VectorContextRetriever(
             self.graph_store,
             vector_store=index.vector_store,
+            embed_model=embed_model,
             include_text=True,
             similarity_top_k=similarity_top_k,
             path_depth=path_depth,
@@ -56,7 +63,7 @@ class HybridGraphRetriever(CustomPGRetriever):
         # 初始化文本到Cypher检索器
         self._cypher_retriever = TextToCypherRetriever(
             self.graph_store,
-            llm=Settings.llm,
+            llm=llm,
             text_to_cypher_template=CYPHER_PROMPT
         )
 
@@ -67,74 +74,81 @@ class HybridGraphRetriever(CustomPGRetriever):
         扩展到整个社区所有实体关联的文本块。
         返回一个包含入口实体、触发的社区ID和社区节点的字典。
         """
-        if not initial_nodes:
-            return {}
+        with self._tracer.start_as_current_span("_expand_with_community") as span:
+            if not initial_nodes:
+                return {}
 
-        initial_chunk_ids = [node.node.node_id for node in initial_nodes]
+            initial_chunk_ids = [node.node.node_id for node in initial_nodes]
 
-        # 1. 从入口Chunk中提取提及的实体ID
-        mentioned_entity_ids = set()
-        with self.graph_store._driver.session(database=AURA_DATABASE) as session:
-            cypher_get_entities = """
-            UNWIND $chunk_ids AS chunk_id
-            MATCH (c:Chunk {id: chunk_id})-[:MENTIONS]->(e:__Entity__)
-            RETURN DISTINCT e.id AS entityId
-            """
-            results = session.run(cypher_get_entities, chunk_ids=initial_chunk_ids)
-            for record in results:
-                mentioned_entity_ids.add(record["entityId"])
-
-        if not mentioned_entity_ids:
-            print("    - 初始文本块中未找到提及的实体，无法进行社区扩展。")
-            return {}
-        print(f"    - 从入口节点中提取到 {len(mentioned_entity_ids)} 个实体ID。")
-
-        # 2. 查询这些实体的社区ID
-        community_ids_to_expand = set()
-        with self.graph_store._driver.session(database=AURA_DATABASE) as session:
-            cypher_get_ids = """
-            UNWIND $entity_ids AS entity_id
-            MATCH (n:__Entity__ {id: entity_id})
-            WHERE n.leidenCommunityId IS NOT NULL
-            RETURN DISTINCT n.leidenCommunityId AS communityId
-            """
-            results = session.run(cypher_get_ids, entity_ids=list(mentioned_entity_ids))
-            for record in results:
-                community_ids_to_expand.add(record["communityId"])
-
-        if not community_ids_to_expand:
-            print("    - 提及的实体均未分配社区ID，跳过扩展。")
-            return {}
-        print(f"    - 发现相关社区ID: {list(community_ids_to_expand)}。正在扩展上下文...")
-
-        # 3. 获取这些社区的所有实体关联的文本块 (Chunk)
-        community_nodes_map = {}
-        with self.graph_store._driver.session(database=AURA_DATABASE) as session:
-            for comm_id in community_ids_to_expand:
-                cypher_get_community_chunks = """
-                MATCH (source_node:Chunk)-[:MENTIONS]->(n:__Entity__)
-                WHERE n.leidenCommunityId = $comm_id AND NONE(id IN $initial_chunk_ids WHERE id = source_node.id)
-                RETURN DISTINCT source_node
+            # 1. 从入口Chunk中提取提及的实体ID
+            mentioned_entity_ids = set()
+            with self.graph_store._driver.session(database=AURA_DATABASE) as session:
+                cypher_get_entities = """
+                UNWIND $chunk_ids AS chunk_id
+                MATCH (c:Chunk {id: chunk_id})-[:MENTIONS]->(e:__Entity__)
+                RETURN DISTINCT e.id AS entityId
                 """
-                results = session.run(cypher_get_community_chunks, comm_id=comm_id, initial_chunk_ids=initial_chunk_ids)
-                community_nodes = []
+                results = session.run(cypher_get_entities, chunk_ids=initial_chunk_ids)
                 for record in results:
-                    node_data = dict(record["source_node"])
-                    node_obj = TextNode(
-                        id_=node_data.get("id", node_data.get("element_id")),
-                        text=node_data.get("text", ""),
-                        metadata=node_data,
-                    )
-                    community_nodes.append(NodeWithScore(node=node_obj, score=10.0))
-                if community_nodes:
-                    community_nodes_map[comm_id] = community_nodes
+                    mentioned_entity_ids.add(record["entityId"])
 
-        # 4. 返回一个包含所有信息的字典
-        return {
-            "entry_entity_ids": mentioned_entity_ids,
-            "triggered_community_ids": community_ids_to_expand,
-            "community_nodes_map": community_nodes_map
-        }
+            if not mentioned_entity_ids:
+                print("    - 初始文本块中未找到提及的实体，无法进行社区扩展。")
+                return {}
+            print(f"    - 从入口节点中提取到 {len(mentioned_entity_ids)} 个实体ID。")
+
+            # 2. 查询这些实体的社区ID
+            community_ids_to_expand = set()
+            with self.graph_store._driver.session(database=AURA_DATABASE) as session:
+                cypher_get_ids = """
+                UNWIND $entity_ids AS entity_id
+                MATCH (n:__Entity__ {id: entity_id})
+                WHERE n.leidenCommunityId IS NOT NULL
+                RETURN DISTINCT n.leidenCommunityId AS communityId
+                """
+                results = session.run(cypher_get_ids, entity_ids=list(mentioned_entity_ids))
+                for record in results:
+                    community_ids_to_expand.add(record["communityId"])
+
+            if not community_ids_to_expand:
+                print("    - 提及的实体均未分配社区ID，跳过扩展。")
+                return {}
+            print(f"    - 发现相关社区ID: {list(community_ids_to_expand)}。正在扩展上下文...")
+
+            # 3. 获取这些社区的所有实体关联的文本块 (Chunk)
+            community_nodes_map = {}
+            with self.graph_store._driver.session(database=AURA_DATABASE) as session:
+                for comm_id in community_ids_to_expand:
+                    cypher_get_community_chunks = """
+                    MATCH (source_node:Chunk)-[:MENTIONS]->(n:__Entity__)
+                    WHERE n.leidenCommunityId = $comm_id AND NONE(id IN $initial_chunk_ids WHERE id = source_node.id)
+                    RETURN DISTINCT source_node
+                    """
+                    results = session.run(cypher_get_community_chunks, comm_id=comm_id, initial_chunk_ids=initial_chunk_ids)
+                    community_nodes = []
+                    for record in results:
+                        node_data = dict(record["source_node"])
+                        node_obj = TextNode(
+                            id_=node_data.get("id", node_data.get("element_id")),
+                            text=node_data.get("text", ""),
+                            metadata=node_data,
+                        )
+                        community_nodes.append(NodeWithScore(node=node_obj, score=10.0))
+                    if community_nodes:
+                        community_nodes_map[comm_id] = community_nodes
+
+            # 4. 返回一个包含所有信息的字典
+            span.set_attribute("input.initial_nodes_count", len(initial_nodes))
+            span.set_attribute("output.mentioned_entity_ids_count", len(mentioned_entity_ids))
+            span.set_attribute("output.community_ids_count", len(community_ids_to_expand))
+
+            total_community_nodes = sum(len(nodes) for nodes in community_nodes_map.values())
+            span.set_attribute("output.total_community_nodes_found", total_community_nodes)
+            return {
+                "entry_entity_ids": mentioned_entity_ids,
+                "triggered_community_ids": community_ids_to_expand,
+                "community_nodes_map": community_nodes_map
+            }
 
     @timer
     def custom_retrieve(self, query_str: str) -> List[NodeWithScore]:
@@ -144,109 +158,124 @@ class HybridGraphRetriever(CustomPGRetriever):
         2. 如果开启，进行社区上下文扩展。
         3. 合并并去重结果。
         """
+        current_span = trace.get_current_span()
+        current_span.set_attribute("input.query", query_str)
         print("--- 开始执行混合检索 ---")
 
         # 向量检索
-        print("  - 步骤1: 执行向量检索...")
-        vector_nodes = self._vector_retriever.retrieve(query_str)
-        for node in vector_nodes:
-            node.node.metadata["retrieval_source"] = "Vector Search (Entry)"
-        print(f"  - 向量检索找到 {len(vector_nodes)} 个节点。")
+        with self._tracer.start_as_current_span("Vector Retrieval") as vector_span:
+            print("  - 步骤1: 执行向量检索...")
+            vector_nodes = self._vector_retriever.retrieve(query_str)
+            for node in vector_nodes:
+                node.node.metadata["retrieval_source"] = "Vector Search (Entry)"
+            print(f"  - 向量检索找到 {len(vector_nodes)} 个节点。")
 
-        # Cypher检索
-        print("  - 步骤2: 执行文本到Cypher检索...")
+
         cypher_nodes = []  # 默认cypher_nodes为空列表
-        try:
-            retrieved_cypher_nodes = self._cypher_retriever.retrieve(query_str)
+        with self._tracer.start_as_current_span("Text-to-Cypher Retrieval") as cypher_span:
+            # Cypher检索
+            print("  - 步骤2: 执行文本到Cypher检索...")
+            try:
+                retrieved_cypher_nodes = self._cypher_retriever.retrieve(query_str)
 
-            # 检查返回的是否是代表空查询的节点
-            if retrieved_cypher_nodes and 'Generated Cypher query:\n\n\nCypher Response:\n[]' in retrieved_cypher_nodes[
-                0].text:
-                print("  - Cypher检索返回空查询，跳过。")
-            else:
-                cypher_nodes = retrieved_cypher_nodes
-                for node in cypher_nodes:
-                    node.node.metadata["retrieval_source"] = "Text-to-Cypher"
-        except Exception as e:
-            # 捕获其他可能的异常
-            print(f"  - Cypher检索时发生未知错误: {e}")
+                # 检查返回的是否是代表空查询的节点
+                if retrieved_cypher_nodes and 'Generated Cypher query:\n\n\nCypher Response:\n[]' in retrieved_cypher_nodes[
+                    0].text:
+                    print("  - Cypher检索返回空查询，跳过。")
+                else:
+                    cypher_nodes = retrieved_cypher_nodes
+                    for node in cypher_nodes:
+                        node.node.metadata["retrieval_source"] = "Text-to-Cypher"
+                        if retrieved_cypher_nodes:
+                            generated_query = retrieved_cypher_nodes[0].text.split("Cypher Response:")[0].strip()
+                            cypher_span.set_attribute("llm.generated_cypher", generated_query)
 
-        print(f"  - Cypher检索找到 {len(cypher_nodes)} 个节点。")
 
+            except Exception as e:
+
+                cypher_span.record_exception(e)
+
+                cypher_span.set_status(Status(StatusCode.ERROR, str(e)))
+
+                print(f"  - Cypher检索时发生未知错误: {e}")
         # --- 社区扩展逻辑 ---
         all_community_nodes = []
         if self._community_expansion and vector_nodes:
-            print("  - 步骤3: (已开启) 执行社区上下文扩展...")
-            # expansion_results 是一个包含多个信息的字典
-            expansion_results = self._expand_with_community(vector_nodes)
+            with self._tracer.start_as_current_span("Community Expansion") as expansion_span:
+                print("  - 步骤3: (已开启) 执行社区上下文扩展...")
+                # expansion_results 是一个包含多个信息的字典
+                expansion_results = self._expand_with_community(vector_nodes)
 
-            if expansion_results:
-                community_nodes_map = expansion_results.get("community_nodes_map", {})
+                if expansion_results:
+                    community_nodes_map = expansion_results.get("community_nodes_map", {})
 
-                # 为节点打上标签，并把社区ID存入元数据
-                for comm_id, nodes in community_nodes_map.items():
-                    for node_with_score in nodes:
-                        node_with_score.node.metadata["retrieval_source"] = "Community Expansion"
-                        node_with_score.node.metadata["community_id"] = comm_id
+                    # 为节点打上标签，并把社区ID存入元数据
+                    for comm_id, nodes in community_nodes_map.items():
+                        for node_with_score in nodes:
+                            node_with_score.node.metadata["retrieval_source"] = "Community Expansion"
+                            node_with_score.node.metadata["community_id"] = comm_id
 
-                # 将所有社区节点收集到一个列表中，用于后续合并
-                all_community_nodes = [node for nodes in community_nodes_map.values() for node in nodes]
+                    # 将所有社区节点收集到一个列表中，用于后续合并
+                    all_community_nodes = [node for nodes in community_nodes_map.values() for node in nodes]
 
-                if all_community_nodes:
-                    first_node_metadata = all_community_nodes[0].node.metadata
-                    first_node_metadata["expansion_entry_entities"] = list(
-                        expansion_results.get("entry_entity_ids", []))
-                    first_node_metadata["expansion_triggered_communities"] = list(
-                        expansion_results.get("triggered_community_ids", []))
+                    if all_community_nodes:
+                        first_node_metadata = all_community_nodes[0].node.metadata
+                        first_node_metadata["expansion_entry_entities"] = list(
+                            expansion_results.get("entry_entity_ids", []))
+                        first_node_metadata["expansion_triggered_communities"] = list(
+                            expansion_results.get("triggered_community_ids", []))
 
-                # 打印统计信息
-                total_community_nodes = len(all_community_nodes)
-                print(f"  - 社区扩展找到 {len(community_nodes_map)} 个社区，共 {total_community_nodes} 个额外节点。")
+                    # 打印统计信息
+                    total_community_nodes = len(all_community_nodes)
+                    print(f"  - 社区扩展找到 {len(community_nodes_map)} 个社区，共 {total_community_nodes} 个额外节点。")
 
-        # ------------------------
+            # ------------------------
 
         # 合并与去重
-        print("  - 步骤4: 合并与去重...")
-        combined_nodes = {}
-        all_retrieved_nodes = all_community_nodes + vector_nodes + cypher_nodes
-        for node in all_retrieved_nodes:
-            if node.node.node_id not in combined_nodes:
-                combined_nodes[node.node.node_id] = node
+        with self._tracer.start_as_current_span("Merge and Purify") as merge_span:
+            print("  - 步骤4: 合并与去重...")
+            combined_nodes = {}
+            all_retrieved_nodes = all_community_nodes + vector_nodes + cypher_nodes
+            for node in all_retrieved_nodes:
+                if node.node.node_id not in combined_nodes:
+                    combined_nodes[node.node.node_id] = node
 
-        final_nodes_raw = list(combined_nodes.values())
-        final_nodes_purified = []
-        for node_with_score in final_nodes_raw:
-            original_node = node_with_score.node
+            final_nodes_raw = list(combined_nodes.values())
+            final_nodes_purified = []
+            for node_with_score in final_nodes_raw:
+                original_node = node_with_score.node
 
-            # 1. 明确地只提取文本内容
-            text_content = original_node.get_content(metadata_mode="none")
+                # 1. 明确地只提取文本内容
+                text_content = original_node.get_content(metadata_mode="none")
 
-            # 2. 检查文本内容有效性
-            if not isinstance(text_content, str) or not text_content.strip():
-                print(f"  - [过滤] 丢弃了一个文本内容为空或无效的节点: ID={original_node.node_id}")
-                continue
+                # 2. 检查文本内容有效性
+                if not isinstance(text_content, str) or not text_content.strip():
+                    print(f"  - [过滤] 丢弃了一个文本内容为空或无效的节点: ID={original_node.node_id}")
+                    continue
 
-            # 3. 移除 'embedding' 键
-            clean_metadata = original_node.metadata.copy()  # 创建副本以避免修改原始对象
-            if 'embedding' in clean_metadata:
-                del clean_metadata['embedding']
-                print(f"  - [净化] 从节点 {original_node.node_id} 的元数据中移除了 embedding。")
+                # 3. 移除 'embedding' 键
+                clean_metadata = original_node.metadata.copy()  # 创建副本以避免修改原始对象
+                if 'embedding' in clean_metadata:
+                    del clean_metadata['embedding']
+                    print(f"  - [净化] 从节点 {original_node.node_id} 的元数据中移除了 embedding。")
 
-            # 4. 创建一个全新的纯净的 TextNode 对象
-            purified_node = TextNode(
-                id_=original_node.node_id,
-                text=text_content,
-                metadata=clean_metadata,
-            )
+                # 4. 创建一个全新的纯净的 TextNode 对象
+                purified_node = TextNode(
+                    id_=original_node.node_id,
+                    text=text_content,
+                    metadata=clean_metadata,
+                )
 
-            # 5. 用纯净的节点和原始分数重新组装 NodeWithScore
-            final_nodes_purified.append(NodeWithScore(
-                node=purified_node,
-                score=node_with_score.score
-            ))
+                # 5. 用纯净的节点和原始分数重新组装 NodeWithScore
+                final_nodes_purified.append(NodeWithScore(
+                    node=purified_node,
+                    score=node_with_score.score
+                ))
+            merge_span.set_attribute("input.combined_nodes_count", len(final_nodes_raw))
+            merge_span.set_attribute("output.purified_nodes_count", len(final_nodes_purified))
+            print(f"--- 净化完成，节点数从 {len(final_nodes_raw)} 变为 {len(final_nodes_purified)} ---\n")
 
-        print(f"--- 净化完成，节点数从 {len(final_nodes_raw)} 变为 {len(final_nodes_purified)} ---\n")
-
+        current_span.set_attribute("output.final_nodes_count", len(final_nodes_purified))
         return final_nodes_purified
 
     @timer
@@ -409,7 +438,7 @@ def load_existing_graph_index():
         url=AURA_URI,
         database=AURA_DATABASE,
     )
-    index = PropertyGraphIndex.from_existing(property_graph_store=graph_store)
+    index = PropertyGraphIndex.from_existing(property_graph_store=graph_store, llm=llm, embed_model=embed_model)
     print("图谱索引加载成功！")
     return index
 
@@ -427,13 +456,15 @@ def run_queries(index: PropertyGraphIndex):
     # --- 查询模式: 自定义混合检索 vs. 基础向量检索 ---
     print("\n" + "=" * 60)
     print("--- 自定义混合检索 vs. 基础向量检索 ---")
-    query = "分析一下2024年半导体发展情况和面临挑战"
+    query = "分析一下国内半导体行业发展方向"
     print(f"问题: {query}")
 
     # --- 1. 自定义混合检索查询引擎 ---
     print("\n 正在构建自定义混合检索查询引擎...")
     hybrid_retriever = HybridGraphRetriever(
         graph_store=index.property_graph_store,
+        tracer=tracer,
+        llm=llm,
         index=index,
         similarity_top_k=1,
         community_expansion=True,
@@ -441,16 +472,13 @@ def run_queries(index: PropertyGraphIndex):
     )
     custom_query_engine = RetrieverQueryEngine.from_args(
         retriever=hybrid_retriever,
-        llm=Settings.llm,
+        llm=llm,
     )
 
 
     # 执行自定义查询
     print("\n" + "-" * 25 + " 执行自定义混合查询 " + "-" * 25)
     custom_response = custom_query_engine.query(query)
-    print("\n展开上下文:")
-    display(Markdown(f"<b>{custom_response}</b>"))
-    print("\n[结果] 自定义混合查询的最终答案:")
     print(custom_response.response)
 
     hybrid_retriever.print_categorized_source_nodes(custom_response)
