@@ -144,11 +144,11 @@ class FinancialWorkflow(Workflow):
 
             if decision.get("task_type") == "calculator":
                 if self.verbose: print(f"--- [Dispatcher]: 决策 -> 计算器路径 ---")
-                return CalculatorTriggerEvent(user_msg=ev.user_msg, query=ev.user_msg)
+                return CalculatorTriggerEvent(user_msg=ev.user_msg, query=ev.user_msg, current_loop=ev.current_loop)
 
             if decision.get("task_type") == "retrieval":
 
-                return RAGTriggerEvent(user_msg=ev.user_msg, query=ev.user_msg)
+                return RAGTriggerEvent(user_msg=ev.user_msg, query=ev.user_msg, current_loop=ev.current_loop)
             else:
                 return SimpleChatTriggerEvent(user_msg=ev.user_msg)
 

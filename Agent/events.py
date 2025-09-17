@@ -7,6 +7,7 @@ from llama_index.core.schema import NodeWithScore
 class UserInputEvent(StartEvent):
     user_msg: str
     chat_history: List[Dict[str, Any]] = Field(default_factory=list)
+    current_loop: int = 1
     previous_attempt: Optional[str] = None # 上一轮的草稿答案
     critique_feedback: Optional[str] = None # 上一轮的批评意见
 
