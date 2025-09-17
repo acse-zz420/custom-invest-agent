@@ -65,7 +65,7 @@ def initialize_workflow():
 
     # a. 加载模型和资源
     print("   - Loading models and resources...")
-    Settings.embed_model = get_embedding_model()
+    _, _, Settings.embed_model = get_embedding_model()
     llm = QwenToolLLM()
 
     # b. 创建工作流实例

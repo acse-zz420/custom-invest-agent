@@ -9,7 +9,6 @@ from llama_index.core import (
 )
 from timer_tool import timer
 from llama_index.graph_stores.neo4j import Neo4jPropertyGraphStore
-from llama_index.core.indices.property_graph import SimpleLLMPathExtractor
 from llama_index.core.indices.property_graph import SchemaLLMPathExtractor
 from llm import VolcengineLLM
 from prompt import EXTRACTOR_PROMPT, FINANCE_ENTITIES, FINANCE_RELATIONS, FINANCE_VALIDATION_SCHEMA
@@ -143,7 +142,7 @@ def clear_database(graph_store: Neo4jPropertyGraphStore):
     """清理 Neo4j 数据库中的所有节点和关系"""
     logging.info("正在清理 Neo4j 数据库...")
     try:
-        with graph_store._driver.session(database=NEO4J_DATABASE) as session:
+        with graph_store._driver.session(database=AURA_DATABASE) as session:
             session.run("MATCH (n) DETACH DELETE n")
         logging.info("数据库清理完毕。")
     except Exception as e:
@@ -246,17 +245,18 @@ def run_leiden_community_detection(graph_store: Neo4jPropertyGraphStore):
 
 
 @timer
-def build_property_graph():
+def build_property_graph(overwrite: bool = False) -> None:
     """主函数，执行完整的知识图谱构建流程
     Args:
-        use_leiden (bool): 是否启用 Leiden 社区发现算法，默认为 False
+        overwrite (bool): 是否覆盖现有数据库，默认为 False
     """
     graph_store = None
     try:
         llm, _ = setup_llm_and_embed_model()
         graph_store = get_neo4j_graph_store()
 
-        clear_database(graph_store)
+        if overwrite:
+            clear_database(graph_store)
 
         nodes = load_and_chunk_documents(MD_TEST_DIR)
         if not nodes:
@@ -266,12 +266,12 @@ def build_property_graph():
         kg_extractor = SchemaLLMPathExtractor(
             llm=llm,
             possible_entities=FINANCE_ENTITIES,
-            # possible_relations=FINANCE_RELATIONS,
-            # kg_validation_schema=FINANCE_VALIDATION_SCHEMA,
-            strict=False,  # if false, will allow triplets outside of the schema
+            possible_relations=FINANCE_RELATIONS,
+            kg_validation_schema=FINANCE_VALIDATION_SCHEMA,
+            strict=True,  # if false, will allow triplets outside of the schema
             extract_prompt=EXTRACTOR_PROMPT,
             num_workers=4,
-            max_triplets_per_chunk=3,
+            max_triplets_per_chunk=5,
         )
 
         logging.info("开始构建 PropertyGraphIndex...")

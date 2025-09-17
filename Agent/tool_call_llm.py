@@ -1,4 +1,5 @@
-import json, httpx
+import json
+import logging
 from typing import Any, List, Optional
 
 from openai import AsyncOpenAI, OpenAI
@@ -184,9 +185,9 @@ class DoubaoToolLLM(CustomLLM):
         # 打印调试信息 (保持不变)
         if self.verbose:
             payload_to_print = {"model": self.model, "messages": openai_messages, **api_kwargs}
-            print("\n" + "=" * 20 + " [DoubaoToolLLM Debug: Final OpenAI Payload] " + "=" * 20)
-            print(json.dumps(payload_to_print, indent=2, ensure_ascii=False))
-            print("=" * 80 + "\n")
+            logging.info("\n" + "=" * 20 + " [DoubaoToolLLM Debug: Final OpenAI Payload] " + "=" * 20)
+            logging.info(json.dumps(payload_to_print, indent=2, ensure_ascii=False))
+            logging.info("=" * 80 + "\n")
 
         # 调用 API
         try:
