@@ -10,7 +10,8 @@ from llama_index.core.workflow import (
 from llama_index.core.agent.workflow import AgentWorkflow
 from pyexpat.errors import messages
 
-from Agent.tools.financial_calculator import financial_calculator_tool
+# from Agent.tools.financial_calculator import financial_calculator_tool
+from Agent.tools.pseudo_calculator import financial_calculator_tool
 from Agent.tools.rag_tools import *
 from llama_index.core.llms import ChatMessage
 
@@ -19,9 +20,12 @@ from Agent.events import *
 from opentelemetry import trace
 from opentelemetry.trace import Tracer
 from llama_index.utils.workflow import draw_all_possible_flows
+from datetime import datetime
+
 
 class FinancialWorkflow(Workflow):
-    def __init__(self, llm: LLM, agents: Dict[str, AgentWorkflow], tracer: Tracer, verbose: bool = False, max_loops:int=2):
+    def __init__(self, llm: LLM, agents: Dict[str, AgentWorkflow], tracer: Tracer,
+                 verbose: bool = False, max_loops: int = 2):
         super().__init__(
             timeout=600.0,
             verbose=verbose,
@@ -257,8 +261,6 @@ class FinancialWorkflow(Workflow):
             current_loop=ref_event.current_loop
         )
 
-
-
     # 步骤 B.5: 生成最终答案
     @step
     async def summarizer_step(self, ev: SummarizationEvent) -> CritiqueEvent:
@@ -267,7 +269,7 @@ class FinancialWorkflow(Workflow):
         span.set_attribute("final_context_length", len(ev.final_context))
 
         if self.verbose: print(f"---  [Summarizer]: 生成草稿回答... ---")
-        prompt = SUMMARIZER_PROMPT.format(context=ev.final_context, user_msg=ev.user_msg)
+        prompt = SUMMARIZER_PROMPT.format(context=ev.final_context, user_msg=ev.user_msg, today=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         response = await self.llm.achat([ChatMessage(role="user", content=prompt)])
         draft_answer = response.message.content
 
@@ -284,7 +286,7 @@ class FinancialWorkflow(Workflow):
         span.set_attribute("current_loop", ev.current_loop)
 
         if self.verbose: print(f"--- [Critique]: 评估草稿回答... ---")
-        prompt = CRITIQUE_PROMPT.format(user_msg=ev.user_msg, draft_answer=ev.preliminary_answer)
+        prompt = CRITIQUE_PROMPT.format(user_msg=ev.user_msg, draft_answer=ev.preliminary_answer, today=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         response = await self.llm.achat([ChatMessage(role="user", content=prompt)])
         raw_content = response.message.content or ""
         if self.verbose: print(f"--- [Dispatcher]: LLM 返回的原始决策文本: '{raw_content}' ---")
@@ -323,4 +325,4 @@ class FinancialWorkflow(Workflow):
                 critique_feedback=critique.get('missing_information'), current_loop=current_loop + 1)
 
 
-# draw_all_possible_flows(FinancialWorkflow, filename="multi_step_workflow.html")
+draw_all_possible_flows(FinancialWorkflow, filename="multi_step_workflow.html")
